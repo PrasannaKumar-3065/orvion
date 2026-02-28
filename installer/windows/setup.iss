@@ -49,11 +49,11 @@ SolidCompression    = yes
 LZMAUseSeparateProcess = yes
 
 ; ── Requirements ──────────────────────────────────────────────────────────────
-PrivilegesRequired  = admin  ; install per-user if no admin rights
-PrivilegesRequiredOverridesAllowed = dialog
-MinVersion          = 10.0.17763      ; Windows 10 1809+
-ArchitecturesAllowed             = x64
-ArchitecturesInstallIn64BitMode  = x64
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
+MinVersion=10.0.17763
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 
 ; ── Misc ──────────────────────────────────────────────────────────────────────
 DisableProgramGroupPage = yes
