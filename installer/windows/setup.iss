@@ -23,7 +23,7 @@
 
 [Setup]
 ; ── Identity ──────────────────────────────────────────────────────────────────
-AppId               = {{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+AppId               = {{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}}
 AppName             = {#AppName}
 AppVersion          = {#AppVersion}
 AppVerName          = {#AppName} {#AppVersion}
@@ -49,7 +49,7 @@ SolidCompression    = yes
 LZMAUseSeparateProcess = yes
 
 ; ── Requirements ──────────────────────────────────────────────────────────────
-PrivilegesRequired  = lowestpossible  ; install per-user if no admin rights
+PrivilegesRequired  = admin  ; install per-user if no admin rights
 PrivilegesRequiredOverridesAllowed = dialog
 MinVersion          = 10.0.17763      ; Windows 10 1809+
 ArchitecturesAllowed             = x64
