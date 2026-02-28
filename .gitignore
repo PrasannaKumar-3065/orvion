@@ -12,6 +12,7 @@ build/
 # PyInstaller output
 dist/
 build/
+*.spec
 *.spec.bak
 
 # Virtual environments
@@ -46,7 +47,12 @@ desktop.ini
 *.cer
 *.key
 
-#cache
-.unsloth_compiled_cache/
+# Cache and compiled files
+unsloth_compiled_cache/
 .unsloth_cache/
 .pip_cache/
+.pytest_cache/
+.mypy_cache/
+*.log
+.coverage
+.coverage.*
