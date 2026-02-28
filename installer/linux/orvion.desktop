@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Orvion
+GenericName=AI Chat Workspace
+Comment=Modern AI Chat + Browser Agent powered by Orvion-VL
+Exec=orvion %F
+Icon=orvion
+Terminal=false
+StartupNotify=true
+StartupWMClass=Orvion
+Categories=Office;Network;Science;
+Keywords=AI;Chat;LLM;Browser;Agent;
+MimeType=

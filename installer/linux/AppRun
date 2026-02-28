@@ -1,0 +1,30 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Orvion AppImage entry point
+#
+#  Sets up the environment for the bundled PyInstaller application, then
+#  launches the Orvion executable.
+#
+#  $APPDIR is set automatically by the AppImage runtime to the mount point
+#  of the squashfs image.
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -e
+
+HERE="$(dirname "$(readlink -f "$0")")"
+
+# ── Bundled Qt / WebEngine requires these env vars ────────────────────────────
+export QT_PLUGIN_PATH="${HERE}/PyQt5/Qt5/plugins:${QT_PLUGIN_PATH}"
+export QML2_IMPORT_PATH="${HERE}/PyQt5/Qt5/qml:${QML2_IMPORT_PATH}"
+export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS} --no-sandbox"
+
+# ── GPU / display ─────────────────────────────────────────────────────────────
+export LD_LIBRARY_PATH="${HERE}:${HERE}/lib:${LD_LIBRARY_PATH}"
+
+# Ensure a usable DISPLAY for headless CI environments
+if [ -z "${DISPLAY}" ] && [ -z "${WAYLAND_DISPLAY}" ]; then
+    export DISPLAY=":0"
+fi
+
+# ── Launch ────────────────────────────────────────────────────────────────────
+exec "${HERE}/Orvion" "$@"

@@ -1,0 +1,581 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Orvion — Cross-Platform Build Pipeline
+#  ───────────────────────────────────────────────────────────────────────────
+#  Triggers:
+#    • push to main / master
+#    • pull request to main / master
+#    • manual dispatch (workflow_dispatch)
+#    • version tag push  (v*)  → also creates a GitHub Release
+#
+#  Artifacts produced:
+#    Windows  │ OrvionSetup-windows-x64.exe   (Inno Setup installer)
+#    Linux    │ Orvion-linux-x86_64.AppImage
+#    macOS    │ Orvion-macos-universal.dmg
+#
+#  What is NOT included in the installer:
+#    • The AI model (sanaX3065/Orvion-vl-3b) — downloads on first app launch
+#    • CUDA-specific torch — the first-run wizard upgrades torch if NVIDIA GPU
+#      is detected on the end-user machine
+#
+#  Secrets required for release signing (all optional — builds succeed without):
+#    APPLE_IDENTITY   Developer ID Application: ... string
+#    APPLE_TEAM_ID    10-char Apple Team ID
+#    APPLE_ID         Apple ID email
+#    APPLE_APP_PWD    App-specific password for notarytool
+#    WIN_CERT_BASE64  Base64-encoded .pfx certificate for signtool
+#    WIN_CERT_PWD     Password for the .pfx certificate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Build Orvion Installers
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:     [ "v*" ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release after build?"
+        required: false
+        default: "false"
+        type: choice
+        options: [ "true", "false" ]
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
+  APP_VERSION:    "1.0.0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  WINDOWS BUILD                                                           ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+  build-windows:
+    name: "🪟 Windows — Inno Setup Installer"
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      # ── 1. Source ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Python ───────────────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── 3. Dependencies ─────────────────────────────────────────────────────
+      - name: Upgrade pip / wheel
+        run: python -m pip install --upgrade pip wheel setuptools
+
+      # PyQt5 + WebEngine (pre-built wheels on Windows)
+      - name: Install PyQt5 and WebEngine
+        run: |
+          pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
+
+      # CPU torch — small, universal; GPU torch installed by bootstrap at runtime
+      - name: Install PyTorch (CPU build for bundling)
+        run: |
+          pip install torch torchvision torchaudio `
+            --index-url https://download.pytorch.org/whl/cpu
+
+      # Core ML stack
+      - name: Install ML dependencies
+        run: |
+          pip install `
+            transformers>=4.45.0 `
+            huggingface_hub>=0.24.0 `
+            accelerate>=0.30.0 `
+            safetensors>=0.4.0 `
+            tokenizers>=0.19.0 `
+            qwen-vl-utils>=0.0.8 `
+            Pillow>=10.0.0 `
+            psutil>=5.9.0 `
+            regex `
+            tqdm `
+            requests `
+            pyyaml `
+            packaging `
+            filelock `
+            numpy>=1.24.0
+
+      # Unsloth (CPU-compatible install for static analysis)
+      - name: Install Unsloth (CPU mode for bundling)
+        run: |
+          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" `
+            --no-deps
+        continue-on-error: true   # Non-fatal: bootstrap installs it at first run
+
+      # PyInstaller
+      - name: Install PyInstaller
+        run: pip install pyinstaller>=6.0.0
+
+      # ── 4. PyInstaller build ─────────────────────────────────────────────────
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller orvion.spec --clean --noconfirm
+        env:
+          ORVION_VERSION: ${{ env.APP_VERSION }}
+
+      # ── 5. Placeholder icon (if not in repo) ─────────────────────────────────
+      - name: Generate placeholder icon if missing
+        shell: python
+        run: |
+          import pathlib, sys
+          icon_path = pathlib.Path("installer/windows/orvion.ico")
+          icon_path.parent.mkdir(parents=True, exist_ok=True)
+          if not icon_path.exists():
+              try:
+                  from PIL import Image
+                  img = Image.new("RGBA", (256, 256), (108, 78, 230, 255))
+                  img.save(icon_path, format="ICO", sizes=[(16,16),(32,32),(48,48),(256,256)])
+                  print(f"Generated placeholder: {icon_path}")
+              except Exception as e:
+                  print(f"Could not generate icon: {e}")
+                  # Touch the file so Inno Setup does not error
+                  icon_path.write_bytes(b"")
+
+      # ── 6. Optional: sign the .exe ────────────────────────────────────────────
+      - name: Sign executable (optional)
+        if: ${{ secrets.WIN_CERT_BASE64 != '' }}
+        shell: powershell
+        run: |
+          $cert_bytes = [Convert]::FromBase64String("${{ secrets.WIN_CERT_BASE64 }}")
+          $cert_path  = "$env:TEMP\orvion_cert.pfx"
+          [IO.File]::WriteAllBytes($cert_path, $cert_bytes)
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
+              /f  $cert_path `
+              /p  "${{ secrets.WIN_CERT_PWD }}" `
+              /tr "http://timestamp.digicert.com" `
+              /td sha256 /fd sha256 `
+              "dist\Orvion\Orvion.exe"
+          Remove-Item $cert_path -Force
+
+      # ── 7. Inno Setup ────────────────────────────────────────────────────────
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --yes --no-progress
+        shell: powershell
+
+      - name: Create output directory
+        run: mkdir -Force dist\installer
+        shell: powershell
+
+      - name: Build Inno Setup installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+              /DAppVersion="${{ env.APP_VERSION }}" `
+              "installer\windows\setup.iss"
+        shell: powershell
+
+      # ── 8. Sign the installer (optional) ─────────────────────────────────────
+      - name: Sign installer (optional)
+        if: ${{ secrets.WIN_CERT_BASE64 != '' }}
+        shell: powershell
+        run: |
+          $cert_bytes = [Convert]::FromBase64String("${{ secrets.WIN_CERT_BASE64 }}")
+          $cert_path  = "$env:TEMP\orvion_cert.pfx"
+          [IO.File]::WriteAllBytes($cert_path, $cert_bytes)
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign `
+              /f  $cert_path `
+              /p  "${{ secrets.WIN_CERT_PWD }}" `
+              /tr "http://timestamp.digicert.com" `
+              /td sha256 /fd sha256 `
+              "dist\installer\OrvionSetup-windows-x64.exe"
+          Remove-Item $cert_path -Force
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrvionSetup-windows-x64
+          path: dist/installer/OrvionSetup-windows-x64.exe
+          retention-days: 30
+          if-no-files-found: error
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  LINUX BUILD                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+  build-linux:
+    name: "🐧 Linux — AppImage"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      # ── 1. Source ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. System packages ───────────────────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 \
+            libglib2.0-0 \
+            libdbus-1-3 \
+            libegl1 \
+            libfontconfig1 \
+            libfreetype6 \
+            libx11-6 \
+            libxcb1 \
+            libxext6 \
+            libxrender1 \
+            libxkbcommon0 \
+            libxkbcommon-x11-0 \
+            libnspr4 \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libgbm1 \
+            libasound2 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libxtst6 \
+            binutils \
+            fuse \
+            file \
+            patchelf \
+            upx-ucl
+
+      # ── 3. Python ───────────────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── 4. Dependencies ─────────────────────────────────────────────────────
+      - name: Upgrade pip / wheel
+        run: python -m pip install --upgrade pip wheel setuptools
+
+      - name: Install PyQt5 and WebEngine
+        run: |
+          pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
+
+      - name: Install PyTorch (CPU build for bundling)
+        run: |
+          pip install torch torchvision torchaudio \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install ML dependencies
+        run: |
+          pip install \
+            transformers>=4.45.0 \
+            huggingface_hub>=0.24.0 \
+            accelerate>=0.30.0 \
+            safetensors>=0.4.0 \
+            tokenizers>=0.19.0 \
+            qwen-vl-utils>=0.0.8 \
+            Pillow>=10.0.0 \
+            psutil>=5.9.0 \
+            regex \
+            tqdm \
+            requests \
+            pyyaml \
+            packaging \
+            filelock \
+            numpy>=1.24.0
+
+      - name: Install Unsloth (CPU mode for bundling)
+        run: |
+          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" \
+            --no-deps
+        continue-on-error: true
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller>=6.0.0
+
+      # ── 5. PyInstaller build ─────────────────────────────────────────────────
+      - name: Generate placeholder icon if missing
+        run: |
+          mkdir -p installer/linux
+          if [ ! -f installer/linux/orvion.png ]; then
+            python3 -c "
+          from PIL import Image
+          img = Image.new('RGBA', (256, 256), (108, 78, 230, 255))
+          img.save('installer/linux/orvion.png')
+          print('Generated placeholder icon')
+          " || echo "Warning: Could not generate placeholder icon"
+          fi
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller orvion.spec --clean --noconfirm
+        env:
+          ORVION_VERSION: ${{ env.APP_VERSION }}
+
+      # ── 6. Build AppImage ─────────────────────────────────────────────────────
+      - name: Make AppImage build script executable
+        run: chmod +x installer/linux/build_appimage.sh installer/linux/AppRun
+
+      - name: Build AppImage
+        run: |
+          bash installer/linux/build_appimage.sh
+        env:
+          ORVION_VERSION: ${{ env.APP_VERSION }}
+
+      # ── 7. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orvion-linux-x86_64
+          path: dist/installer/Orvion-linux-x86_64.AppImage
+          retention-days: 30
+          if-no-files-found: error
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  macOS BUILD                                                             ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+  build-macos:
+    name: "🍎 macOS — DMG"
+    runs-on: macos-14         # Apple Silicon runner (M1) — also builds for x86_64
+    timeout-minutes: 90
+
+    steps:
+      # ── 1. Source ───────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Python ───────────────────────────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── 3. Homebrew tools ────────────────────────────────────────────────────
+      - name: Install Homebrew tools
+        run: |
+          brew install create-dmg upx || true
+
+      # ── 4. Dependencies ─────────────────────────────────────────────────────
+      - name: Upgrade pip / wheel
+        run: python -m pip install --upgrade pip wheel setuptools
+
+      - name: Install PyQt5 and WebEngine
+        run: |
+          pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
+
+      - name: Install PyTorch (CPU build for bundling)
+        run: |
+          pip install torch torchvision torchaudio
+
+      - name: Install ML dependencies
+        run: |
+          pip install \
+            transformers>=4.45.0 \
+            huggingface_hub>=0.24.0 \
+            accelerate>=0.30.0 \
+            safetensors>=0.4.0 \
+            tokenizers>=0.19.0 \
+            qwen-vl-utils>=0.0.8 \
+            Pillow>=10.0.0 \
+            psutil>=5.9.0 \
+            regex \
+            tqdm \
+            requests \
+            pyyaml \
+            packaging \
+            filelock \
+            numpy>=1.24.0
+
+      - name: Install Unsloth (CPU mode for bundling)
+        run: |
+          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" \
+            --no-deps
+        continue-on-error: true
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller>=6.0.0
+
+      # ── 5. PyInstaller build ─────────────────────────────────────────────────
+      - name: Generate placeholder icon if missing
+        run: |
+          mkdir -p installer/macos
+          if [ ! -f installer/macos/orvion.icns ]; then
+            python3 -c "
+          import os, subprocess, pathlib
+          from PIL import Image
+          # Create a simple PNG first
+          img = Image.new('RGBA', (1024, 1024), (108, 78, 230, 255))
+          png_path = 'installer/macos/orvion_icon.png'
+          img.save(png_path)
+          # Convert to icns via iconutil
+          iconset = pathlib.Path('installer/macos/orvion.iconset')
+          iconset.mkdir(exist_ok=True)
+          for size in [16, 32, 64, 128, 256, 512, 1024]:
+              resized = img.resize((size, size), Image.LANCZOS)
+              resized.save(iconset / f'icon_{size}x{size}.png')
+              if size <= 512:
+                  resized2 = img.resize((size*2, size*2), Image.LANCZOS)
+                  resized2.save(iconset / f'icon_{size}x{size}@2x.png')
+          r = subprocess.run(['iconutil', '-c', 'icns', str(iconset),
+                              '-o', 'installer/macos/orvion.icns'], capture_output=True)
+          print('iconutil:', r.returncode, r.stderr.decode())
+          " || echo "Warning: Could not generate .icns"
+          fi
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller orvion.spec --clean --noconfirm
+        env:
+          ORVION_VERSION: ${{ env.APP_VERSION }}
+
+      # ── 6. Ad-hoc sign for local testing (always) ─────────────────────────────
+      - name: Ad-hoc code sign (no Developer ID)
+        run: |
+          codesign --force --deep --sign - \
+            --entitlements installer/macos/entitlements.plist \
+            dist/Orvion.app || true
+
+      # ── 7. Full Developer ID sign (only if secret is set) ─────────────────────
+      - name: Developer ID code sign (optional)
+        if: ${{ secrets.APPLE_IDENTITY != '' }}
+        run: |
+          codesign \
+            --deep --force --verify --verbose \
+            --timestamp \
+            --options runtime \
+            --entitlements installer/macos/entitlements.plist \
+            --sign "${{ secrets.APPLE_IDENTITY }}" \
+            dist/Orvion.app
+
+      # ── 8. Build DMG ─────────────────────────────────────────────────────────
+      - name: Make DMG build script executable
+        run: chmod +x installer/macos/build_dmg.sh
+
+      - name: Build DMG
+        run: |
+          bash installer/macos/build_dmg.sh
+        env:
+          ORVION_VERSION:  ${{ env.APP_VERSION }}
+          APPLE_IDENTITY:  ${{ secrets.APPLE_IDENTITY }}
+          APPLE_TEAM_ID:   ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID:        ${{ secrets.APPLE_ID }}
+          APPLE_APP_PWD:   ${{ secrets.APPLE_APP_PWD }}
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────────
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orvion-macos-universal
+          path: dist/installer/Orvion-macos-universal.dmg
+          retention-days: 30
+          if-no-files-found: error
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  GITHUB RELEASE  (only on version tag push or manual trigger)            ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+  release:
+    name: "🚀 Create GitHub Release"
+    needs: [ build-windows, build-linux, build-macos ]
+    runs-on: ubuntu-latest
+    # Run on tag push OR when manually triggered with create_release=true
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+
+    permissions:
+      contents: write     # needed to create a release
+
+    steps:
+      # ── Download all platform artifacts ──────────────────────────────────────
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: OrvionSetup-windows-x64
+          path: release-assets/
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Orvion-linux-x86_64
+          path: release-assets/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Orvion-macos-universal
+          path: release-assets/
+
+      # ── Compute checksums ─────────────────────────────────────────────────────
+      - name: Generate SHA-256 checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          echo ""
+          echo "── Checksums ──"
+          cat SHA256SUMS.txt
+
+      # ── Determine version string ──────────────────────────────────────────────
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${{ env.APP_VERSION }}-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Create release ────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ steps.version.outputs.tag }}
+          name:       "Orvion ${{ steps.version.outputs.tag }}"
+          draft:      false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          body: |
+            ## Orvion ${{ steps.version.outputs.tag }}
+
+            ### Download
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | 🪟 Windows 10/11 | `OrvionSetup-windows-x64.exe` | Run the installer, then launch Orvion |
+            | 🐧 Linux x86_64 | `Orvion-linux-x86_64.AppImage` | `chmod +x` then run |
+            | 🍎 macOS 12+ | `Orvion-macos-universal.dmg` | Open DMG, drag to Applications |
+
+            ### First Launch
+            On the very first launch a **setup wizard** will appear automatically:
+            1. Detects your GPU (NVIDIA supported)
+            2. Installs CUDA-accelerated PyTorch if a GPU is found
+            3. Downloads the **Orvion-VL 3B AI model** (~6 GB) from Hugging Face
+            4. All subsequent launches are fully **offline**
+
+            > Disk space required: ~4 GB (application) + ~6 GB (AI model in user profile)
+
+            ### SHA-256 Checksums
+            See `SHA256SUMS.txt` attached below.
+
+          files: |
+            release-assets/OrvionSetup-windows-x64.exe
+            release-assets/Orvion-linux-x86_64.AppImage
+            release-assets/Orvion-macos-universal.dmg
+            release-assets/SHA256SUMS.txt
