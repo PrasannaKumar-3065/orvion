@@ -49,7 +49,7 @@ SolidCompression    = yes
 LZMAUseSeparateProcess = yes
 
 ; ── Requirements ──────────────────────────────────────────────────────────────
-PrivilegesRequired  = lowest          ; install per-user if no admin rights
+PrivilegesRequired  = lowestpossible  ; install per-user if no admin rights
 PrivilegesRequiredOverridesAllowed = dialog
 MinVersion          = 10.0.17763      ; Windows 10 1809+
 ArchitecturesAllowed             = x64
