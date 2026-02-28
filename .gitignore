@@ -45,3 +45,8 @@ desktop.ini
 *.p12
 *.cer
 *.key
+
+#cache
+.unsloth_compiled_cache/
+.unsloth_cache/
+.pip_cache/
