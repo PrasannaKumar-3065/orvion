@@ -117,7 +117,6 @@ procedure InitializeWizard();
 var
   Msg: String;
 begin
-  { Information page shown before installation begins }
   Msg := 'Orvion will be installed on your computer.' + #13#10 + #13#10 +
          'What happens after installation:' + #13#10 +
          '  • On first launch a one-time setup wizard will appear.' + #13#10 +
@@ -127,11 +126,12 @@ begin
          'Subsequent launches are fully offline.' + #13#10 + #13#10 +
          'Disk space required: ~4 GB (app) + ~6 GB (AI model)';
 
+  { FIXED: Name changed and added 'System Info' as the 4th parameter }
   RequirementsPage := CreateOutputMsgMemoPage(
     wpWelcome,
     'What to Expect',
     'Please read before continuing',
-    'Important Information:', { <-- This is the required ASubCaption parameter }
+    'System Information:',
     Msg
   );
 end;
