@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QColor, QPalette
 
 from main_window import OrvionWindow
-
+import multiprocessing
 
 def main():
     app = QApplication(sys.argv)
@@ -35,4 +35,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()
