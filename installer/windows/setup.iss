@@ -126,7 +126,7 @@ begin
          'Subsequent launches are fully offline.' + #13#10 + #13#10 +
          'Disk space required: ~4 GB (app) + ~6 GB (AI model)';
 
-  { FIXED: Name changed and added 'System Info' as the 4th parameter }
+  { This is the line that was failing previously }
   RequirementsPage := CreateOutputMsgMemoPage(
     wpWelcome,
     'What to Expect',

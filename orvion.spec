@@ -182,11 +182,11 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[
+    icon=(
         "installer/windows/orvion.ico"  if sys.platform == "win32" else
         "installer/macos/orvion.icns"   if sys.platform == "darwin" else
         "installer/linux/orvion.png"
-    ],
+    ),
 )
 
 # ── Collect all into one directory ────────────────────────────────────────────
