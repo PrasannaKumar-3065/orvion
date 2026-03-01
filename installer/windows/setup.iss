@@ -145,23 +145,16 @@ var
   DrivePath:     String;
 begin
   Result := True;
-  
   if CurPageID = wpSelectDir then
   begin
-    SpaceNeededMB := 4096; { 4 GB converted to Megabytes }
-    DrivePath := ExtractFileDrive(WizardDirValue); { Extracts 'C:' from the chosen path }
+    SpaceNeededMB := 4096; { 4 GB }
+    DrivePath := ExtractFileDrive(WizardDirValue);
 
-    { Parameters: Path, CalculateInMegabytes, FreeSpaceVar, TotalSpaceVar }
     if GetSpaceOnDisk(DrivePath, True, SpaceFreeMB, TotalSpaceMB) then
     begin
       if SpaceFreeMB < SpaceNeededMB then
       begin
-        MsgBox(
-          'Not enough disk space.' + #13#10 +
-          'Orvion requires at least 4 GB free in the selected directory' + #13#10 +
-          '(plus ~6 GB for the AI model in your user profile).',
-          mbError, MB_OK
-        );
+        MsgBox('Not enough disk space. Orvion requires at least 4 GB free.', mbError, MB_OK);
         Result := False;
       end;
     end;
