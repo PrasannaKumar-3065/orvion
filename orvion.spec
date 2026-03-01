@@ -129,7 +129,7 @@ a = Analysis(
     hiddenimports=ALL_HIDDEN,
     hookspath=["hooks"],       # custom hooks in ./hooks/
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=["rthooks/rthook_torch.py"],
     excludes=EXCLUDES,
     noarchive=False,
 )

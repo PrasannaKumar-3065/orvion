@@ -5,9 +5,13 @@
 ;
 ;  What it does:
 ;    1. Unpacks the PyInstaller dist/Orvion/ directory into Program Files
-;    2. Creates a desktop shortcut and Start Menu entry
-;    3. Registers an Uninstall entry in "Add or Remove Programs"
-;    4. Does NOT bundle the AI model — that downloads on first app launch.
+;    2. Bundles and silently installs the VC++ 2015-2022 runtime
+;    3. Creates a desktop shortcut and Start Menu entry
+;    4. Registers an Uninstall entry in "Add or Remove Programs"
+;    5. Does NOT bundle the AI model — that downloads on first app launch.
+;
+;  The CI workflow downloads vc_redist.x64.exe into installer\windows\
+;  before running ISCC, so it is available as a local file here.
 ;
 ;  Build command (from repo root, after PyInstaller run):
 ;    iscc installer\windows\setup.iss
@@ -20,6 +24,7 @@
 #define AppExeName     "Orvion.exe"
 #define DistDir        "..\..\dist\Orvion"
 #define OutDir         "..\..\dist\installer"
+#define VCRedist       "vc_redist.x64.exe"
 
 [Setup]
 ; ── Identity ──────────────────────────────────────────────────────────────────
@@ -49,11 +54,11 @@ SolidCompression    = yes
 LZMAUseSeparateProcess = yes
 
 ; ── Requirements ──────────────────────────────────────────────────────────────
-PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=dialog
-MinVersion=10.0.17763
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+PrivilegesRequired              = admin
+PrivilegesRequiredOverridesAllowed = dialog
+MinVersion                      = 10.0.17763
+ArchitecturesAllowed            = x64
+ArchitecturesInstallIn64BitMode = x64
 
 ; ── Misc ──────────────────────────────────────────────────────────────────────
 DisableProgramGroupPage = yes
@@ -78,46 +83,42 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
 Source: "{#DistDir}\*"; DestDir: "{app}"; \
         Flags: ignoreversion recursesubdirs createallsubdirs
 
-Source: "https://aka.ms/vs/17/release/vc_redist.x64.exe"; \
-    DestDir: "{tmp}"; \
-    DestName: "vc_redist.x64.exe"; \
-    Flags: external
+; VC++ Runtime — downloaded by CI into installer\windows\ before ISCC runs.
+; It is a plain local file, NOT an external URL.
+Source: "{#VCRedist}"; DestDir: "{tmp}"; \
+        DestName: "vc_redist.x64.exe"; \
+        Flags: deleteafterinstall
+
 
 ; ══════════════════════════════════════════════════════════════════════════════
 [Icons]
-; Start Menu
-Name: "{group}\{#AppName}";         Filename: "{app}\{#AppExeName}"
+Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-
-; Desktop (only if task selected)
-Name: "{autodesktop}\{#AppName}";   Filename: "{app}\{#AppExeName}"; \
+Name: "{autodesktop}\{#AppName}";     Filename: "{app}\{#AppExeName}"; \
       Tasks: desktopicon
 
 
 ; ══════════════════════════════════════════════════════════════════════════════
 [Run]
-; Launch Orvion after setup finishes (optional tick-box for user)
+; 1. Install VC++ runtime silently
 Filename: "{tmp}\vc_redist.x64.exe"; \
     Parameters: "/install /quiet /norestart"; \
     StatusMsg: "Installing Microsoft Visual C++ Runtime..."; \
-    Flags: waituntilterminated
-    
+    Flags: waituntilterminated runhidden
+
+; 2. Offer to launch Orvion after setup
 Filename: "{app}\{#AppExeName}"; \
-          Description: "{cm:LaunchProgram,{#StringChange(AppName,'&','&&')}}"; \
-          Flags: nowait postinstall skipifsilent
+    Description: "{cm:LaunchProgram,{#StringChange(AppName,'&','&&')}}"; \
+    Flags: nowait postinstall skipifsilent
 
 
 ; ══════════════════════════════════════════════════════════════════════════════
 [UninstallDelete]
-; Remove user data only if user explicitly opted in via custom page (omitted
-; for simplicity — model cache lives in %APPDATA%\Orvion and is left intact)
 Type: filesandordirs; Name: "{app}"
 
 
 ; ══════════════════════════════════════════════════════════════════════════════
 [Code]
-
-{ ── Custom pages ────────────────────────────────────────────────────────── }
 
 var
   RequirementsPage: TOutputMsgMemoWizardPage;
@@ -128,24 +129,22 @@ var
 begin
   Msg := 'Orvion will be installed on your computer.' + #13#10 + #13#10 +
          'What happens after installation:' + #13#10 +
-         '  • On first launch a one-time setup wizard will appear.' + #13#10 +
-         '  • It automatically detects your GPU (NVIDIA supported).' + #13#10 +
-         '  • The Orvion AI model (~6 GB) is downloaded once from' + #13#10 +
-         '    Hugging Face — an internet connection is required.' + #13#10 + #13#10 +
+         '  * On first launch a one-time setup wizard will appear.' + #13#10 +
+         '  * It automatically detects your GPU (NVIDIA supported).' + #13#10 +
+         '  * The Orvion AI model (~6 GB) is downloaded once from' + #13#10 +
+         '    Hugging Face - an internet connection is required.' + #13#10 + #13#10 +
          'Subsequent launches are fully offline.' + #13#10 + #13#10 +
          'Disk space required: ~4 GB (app) + ~6 GB (AI model)';
 
-  { This is the line that was failing previously }
   RequirementsPage := CreateOutputMsgMemoPage(
     wpWelcome,
     'What to Expect',
     'Please read before continuing',
-    'System Information:',
+    'Setup Information:',
     Msg
   );
 end;
 
-{ ── Validate disk space ───────────────────────────────────────────────────── }
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   SpaceNeededMB: Cardinal;
@@ -156,14 +155,17 @@ begin
   Result := True;
   if CurPageID = wpSelectDir then
   begin
-    SpaceNeededMB := 4096; { 4 GB }
+    SpaceNeededMB := 4096;
     DrivePath := ExtractFileDrive(WizardDirValue);
-
     if GetSpaceOnDisk(DrivePath, True, SpaceFreeMB, TotalSpaceMB) then
     begin
       if SpaceFreeMB < SpaceNeededMB then
       begin
-        MsgBox('Not enough disk space. Orvion requires at least 4 GB free.', mbError, MB_OK);
+        MsgBox(
+          'Not enough disk space.' + #13#10 +
+          'Orvion requires at least 4 GB free in the selected directory.',
+          mbError, MB_OK
+        );
         Result := False;
       end;
     end;

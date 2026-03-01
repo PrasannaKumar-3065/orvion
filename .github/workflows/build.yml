@@ -164,6 +164,17 @@ jobs:
         shell: powershell
         run: choco install innosetup --yes --no-progress
 
+      # Download vc_redist into installer/windows/ so setup.iss can bundle it
+      # as a plain local file (Inno Setup cannot fetch URLs at build time)
+      - name: Download VC++ Runtime for bundling
+        shell: powershell
+        run: |
+          $url  = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          $dest = "installer\windows\vc_redist.x64.exe"
+          Write-Host "Downloading vc_redist.x64.exe..."
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+          Write-Host "Downloaded: $((Get-Item $dest).Length) bytes"
+
       - name: Create output directory
         shell: powershell
         run: mkdir -Force dist\installer
