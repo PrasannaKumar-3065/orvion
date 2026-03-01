@@ -127,10 +127,11 @@ begin
          'Subsequent launches are fully offline.' + #13#10 + #13#10 +
          'Disk space required: ~4 GB (app) + ~6 GB (AI model)';
 
-  RequirementsPage := CreateOutputMsgMemoWizardPage(
+  RequirementsPage := CreateOutputMsgMemoPage(
     wpWelcome,
     'What to Expect',
     'Please read before continuing',
+    'Important Information:', { <-- This is the required ASubCaption parameter }
     Msg
   );
 end;
