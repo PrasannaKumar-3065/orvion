@@ -15,7 +15,7 @@ wizard again.
 import os
 import sys
 import pathlib
-
+import multiprocessing
 # ── Locate the persistent app-data directory ──────────────────────────────────
 if sys.platform == "win32":
     _APP_DATA = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "Orvion"
@@ -65,6 +65,7 @@ def _run_main_app():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     if _need_bootstrap():
         _run_bootstrap()
     _run_main_app()
