@@ -90,7 +90,7 @@ jobs:
 
       - name: Install PyTorch (CPU build for bundling)
         run: |
-          pip install torch torchvision torchaudio `
+          pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 `
             --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install ML dependencies
@@ -270,7 +270,7 @@ jobs:
 
       - name: Install PyTorch (CPU build for bundling)
         run: |
-          pip install torch torchvision torchaudio \
+          pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 \
             --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install ML dependencies
@@ -376,7 +376,7 @@ jobs:
         run: pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
 
       - name: Install PyTorch (CPU build for bundling)
-        run: pip install torch torchvision torchaudio
+        run: pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
 
       - name: Install ML dependencies
         run: |

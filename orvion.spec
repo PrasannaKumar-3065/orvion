@@ -175,7 +175,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,           # compress if UPX is on PATH
+    upx=False,           # compress if UPX is on PATH
     console=False,      # no console window on Windows
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -196,7 +196,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[
         "vcruntime140.dll",
         "python3*.dll",

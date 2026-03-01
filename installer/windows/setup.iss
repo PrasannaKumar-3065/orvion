@@ -78,6 +78,10 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; \
 Source: "{#DistDir}\*"; DestDir: "{app}"; \
         Flags: ignoreversion recursesubdirs createallsubdirs
 
+Source: "https://aka.ms/vs/17/release/vc_redist.x64.exe"; \
+    DestDir: "{tmp}"; \
+    DestName: "vc_redist.x64.exe"; \
+    Flags: external
 
 ; ══════════════════════════════════════════════════════════════════════════════
 [Icons]
@@ -93,6 +97,11 @@ Name: "{autodesktop}\{#AppName}";   Filename: "{app}\{#AppExeName}"; \
 ; ══════════════════════════════════════════════════════════════════════════════
 [Run]
 ; Launch Orvion after setup finishes (optional tick-box for user)
+Filename: "{tmp}\vc_redist.x64.exe"; \
+    Parameters: "/install /quiet /norestart"; \
+    StatusMsg: "Installing Microsoft Visual C++ Runtime..."; \
+    Flags: waituntilterminated
+    
 Filename: "{app}\{#AppExeName}"; \
           Description: "{cm:LaunchProgram,{#StringChange(AppName,'&','&&')}}"; \
           Flags: nowait postinstall skipifsilent
