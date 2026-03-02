@@ -56,5 +56,3 @@ unsloth_compiled_cache/
 *.log
 .coverage
 .coverage.*
-
-*.png
