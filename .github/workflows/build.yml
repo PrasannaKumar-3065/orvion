@@ -124,11 +124,16 @@ jobs:
       - name: Inject HF_TOKEN into .env
         shell: powershell
         run: |
+          # Check if token is empty and issue warning
           $token = "${{ secrets.HF_TOKEN }}"
           if ($token -eq "") {
               Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
           }
+          
+          # Write HF_TOKEN to .env file
           "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8
+          
+          # Output token length
           Write-Host "Wrote .env (token length: $($token.Length))"
 
       # ── 6. PyInstaller build ──────────────────────────────────────────────
