@@ -91,7 +91,7 @@ a = Analysis(
     ["launcher.py"],
     pathex=["."],
     binaries=ALL_BINS,
-    datas=ALL_DATAS,
+    datas=ALL_DATAS + [('.env', '.')],
     hiddenimports=ALL_HIDDEN,
     hookspath=[],           # no custom hooks needed — ML packages are excluded
     hooksconfig={},
