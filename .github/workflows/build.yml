@@ -126,7 +126,7 @@ jobs:
         run: |
           $token = "${{ secrets.HF_TOKEN }}"
           if ($token -eq "") {
-            Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
+              Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
           }
           "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8
           Write-Host "Wrote .env (token length: $($token.Length))"
