@@ -75,7 +75,7 @@ class _SpaceClient:
             try:
                 from gradio_client import Client
                 HF_TOKEN     = os.getenv("HF_TOKEN")
-                self._client = Client(self.space_url, hf_token=HF_TOKEN)
+                self._client = Client(self.space_url)
             except ImportError:
                 raise RuntimeError("gradio_client not installed. Run: pip install gradio_client")
         return self._client
