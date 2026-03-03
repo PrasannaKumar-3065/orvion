@@ -1,26 +1,75 @@
 ORVION AI PROPRIETARY LICENSE
-Version 1.0, March 2026
 
-Copyright (c) 2026 Prasanna Kumar A. All rights reserved.
+Version 1.1 — March 2026
 
-1. PERMITTED USE
-This software ("Orvion") and its associated files are proprietary. 
-Unauthorized copying, modification, distribution, or reverse engineering 
-of the source code, training logic, or DOM-inference pipeline is 
-strictly prohibited.
+Copyright (c) 2026 Prasanna Kumar A.
+All Rights Reserved.
 
-2. INTELLECTUAL PROPERTY
-The unique methodologies regarding DOM-guided vision inference and 
-specific training architectures implemented in Orvion are the 
-intellectual property of the Copyright Holder.
+1. DEFINITIONS
 
-3. THIRD-PARTY COMPONENTS
-Orvion utilizes the following third-party components:
-- Qwen 2.5-VL-3B-Instruct: Subject to the Alibaba Qwen License/Apache 2.0.
-- PyTorch: Subject to the BSD-3 License.
-- Unsloth: Subject to the Apache 2.0 License.
+“Software” refers to the Orvion AI system, including source code, model orchestration logic, DOM-guided inference pipeline, training methodologies, scripts, documentation, and associated materials developed by the Copyright Holder.
 
-4. NO WARRANTY
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, 
-EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR 
-ANY CLAIM, DAMAGES OR OTHER LIABILITY.
+“Third-Party Components” refers to software libraries and models distributed under separate open-source or commercial licenses.
+
+2. LICENSE GRANT
+
+No license is granted to use, reproduce, modify, distribute, sublicense, or create derivative works of the Software unless explicitly authorized in writing by the Copyright Holder.
+
+Access to the source code repository does not grant any rights beyond viewing for reference purposes.
+
+3. RESTRICTIONS
+
+Unless prior written permission is obtained, you may NOT:
+
+Copy or redistribute the Software
+
+Modify or create derivative works
+
+Reverse engineer, decompile, or extract training logic
+
+Use the Software for commercial purposes
+
+Use the Software to build competing systems
+
+Republish or repackage the DOM-inference pipeline or architecture
+
+4. INTELLECTUAL PROPERTY
+
+All proprietary methodologies implemented in Orvion — including but not limited to:
+
+DOM-guided vision inference techniques
+
+Model orchestration workflows
+
+ReAct looping implementations
+
+Custom training and fine-tuning strategies
+
+are the exclusive intellectual property of the Copyright Holder.
+
+No ownership rights are transferred under this license.
+
+5. THIRD-PARTY COMPONENTS
+
+Orvion incorporates Third-Party Components that are licensed separately, including but not limited to:
+
+Qwen 2.5-VL-3B-Instruct (subject to Alibaba Qwen License / Apache 2.0)
+
+PyTorch (BSD-3 License)
+
+Unsloth (Apache 2.0 License)
+
+All Third-Party Components remain subject to their respective licenses.
+Nothing in this license overrides or restricts rights granted under those licenses.
+
+6. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT, OR OTHERWISE, ARISING FROM OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+8. GOVERNING LAW
+
+This License shall be governed by and construed in accordance with the laws of the applicable jurisdiction of the Copyright Holder.
