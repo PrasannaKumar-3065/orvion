@@ -122,22 +122,13 @@ jobs:
 
       # ── 5. Write .env safely using env variables ───────────────────────────
       - name: Inject HF_TOKEN into .env
-        shell: powershell
+        shell: cmd
         env:
-          # This safely maps the secret to an environment variable
           TEMP_HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Read from the env variable, not the GitHub context directly
-          $token = $env:TEMP_HF_TOKEN
-          
-          if ([string]::IsNullOrWhiteSpace($token)) {
-              Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
-          }
-          
-          # Write HF_TOKEN to .env file safely
-          "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8 -NoNewline
-          
-          Write-Host "Wrote .env (token length: $($token.Length))"
+          @echo off
+          echo HF_TOKEN=%TEMP_HF_TOKEN%>.env
+          echo Wrote .env file to disk.
 
       # ── 6. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
