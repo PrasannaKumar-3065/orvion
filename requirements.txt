@@ -1,122 +1,48 @@
 # ============================================================
-#  Orvion — Complete Python Requirements
-#  Generated from full import scan of all source files
-# ============================================================
+#  Orvion — Requirements (API-inference build)
 #
-#  QUICK INSTALL (choose ONE torch line based on your hardware):
+#  This project runs in API mode only — all AI inference is
+#  handled remotely via gradio_client → HuggingFace Space.
+#  PyTorch / transformers / unsloth are NOT required.
 #
-#  GPU (NVIDIA, CUDA 12.1):
-#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-#
-#  GPU (NVIDIA, CUDA 11.8):
-#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-#
-#  CPU only:
-#    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-#
-#  Then install everything else:
+#  Install:
 #    pip install -r requirements.txt
-#
 # ============================================================
 
 
-# ============================================================
-#  1. UI FRAMEWORK
-#     PyQt5 + WebEngine (the embedded Chromium browser)
-# ============================================================
+# ── UI Framework ─────────────────────────────────────────────
 PyQt5>=5.15.10
 PyQtWebEngine>=5.15.7
 
 
-# ============================================================
-#  2. IMAGE PROCESSING
-#     Used by: agent_worker.py (PIL.Image for screenshots),
-#              first_run_bootstrap.py (icon generation)
-# ============================================================
+# ── Image Processing ─────────────────────────────────────────
+#  PIL.Image used in agent_worker.py (screenshots) and
+#  first_run_bootstrap.py (icon generation)
 Pillow>=10.0.0
 
 
-# ============================================================
-#  3. SYSTEM MONITORING
-#     Used by: constants.py (optional psutil import)
-# ============================================================
+# ── System Monitoring ────────────────────────────────────────
 psutil>=5.9.0
 
 
-# ============================================================
-#  4. HUGGING FACE / TRANSFORMERS STACK
-#     Used by: agent_worker.py, constants.py,
-#              first_run_bootstrap.py (snapshot_download)
-# ============================================================
-transformers>=4.45.0
-huggingface_hub>=0.24.0
-tokenizers>=0.19.0
-accelerate>=0.30.0
-safetensors>=0.4.0
-
-
-# ============================================================
-#  5. QWEN VISION-LANGUAGE UTILITIES
-#     Used by: agent_worker.py (process_vision_info)
-# ============================================================
-qwen-vl-utils>=0.0.8
-
-
-# ============================================================
-#  6. UNSLOTH  (fast fine-tuned model loader)
-#     Used by: agent_worker.py (FastVisionModel, Qwen2VLProcessor)
-#
-#     NOTE: unsloth requires torch to be installed first.
-#           GPU users install the CUDA-aware variant:
-#             pip install "unsloth[cu121-torch240]" \
-#               --find-links https://download.pytorch.org/whl/cu121
-#
-#           CPU / generic install (also used by the CI builder):
-#             pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" --no-deps
-#
-#           The first-run wizard (first_run_bootstrap.py) handles
-#           this automatically on the end-user's machine.
-#           Uncomment below ONLY if you are on a CPU-only dev machine:
-# unsloth @ git+https://github.com/unslothai/unsloth.git
-# ============================================================
-
-
-# ============================================================
-#  7. QUANTIZATION  (4-bit model loading, GPU only)
-#     Used by: agent_worker.py (load_in_4bit=True via unsloth)
-#
-#     Linux/macOS:   pip install bitsandbytes>=0.43.0
-#     Windows CUDA:  pip install bitsandbytes>=0.43.0
-#     CPU only:      not needed
-# ============================================================
-bitsandbytes>=0.43.0
-
-
-# ============================================================
-#  8. PYTORCH  (install SEPARATELY before this file — see top)
-#     Listed here only as a reminder; do NOT uncomment unless
-#     you want the default CPU wheel from PyPI (very slow).
-# ============================================================
-# torch>=2.2.0
-# torchvision>=0.17.0
-# torchaudio>=2.2.0
-
-
-# ============================================================
-#  9. GENERAL-PURPOSE UTILITIES
-#     Used throughout the codebase and by transformers/HF
-# ============================================================
-numpy>=1.24.0
-regex>=2023.0.0
+# ── HTTP / Networking ────────────────────────────────────────
 requests>=2.31.0
-tqdm>=4.66.0
-pyyaml>=6.0.0
+
+
+# ── HuggingFace Space Client (API inference) ─────────────────
+#  gradio_client is the ONLY HuggingFace dep needed.
+#  It calls the remote Space over HTTP — no local model needed.
+gradio_client>=0.7.0
+
+
+# ── .env loading ─────────────────────────────────────────────
+#  agent_worker.py calls load_dotenv() to read HF_TOKEN
+python-dotenv>=1.0.0
+
+
+# ── General Utilities ────────────────────────────────────────
 packaging>=23.0
-filelock>=3.13.0
 
 
-# ============================================================
-#  10. BUILD TOOLS  (only needed to produce the installer)
-#      Not required to run the app from source.
-# ============================================================
+# ── Build Tool (not needed to run from source) ───────────────
 # pyinstaller>=6.0.0

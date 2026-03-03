@@ -70,7 +70,7 @@ class ChatPanel(QWidget):
         QTimer.singleShot(40, lambda: self.scroll.verticalScrollBar().setValue(
             self.scroll.verticalScrollBar().maximum()))
 
-    def set_agent(self, agent: "AgentWorker"):
+    def set_agent(self, agent):
         self.agent = agent
         self.agent.chat_reply.connect(self._on_agent_reply)
         self.agent.phase_changed.connect(self._on_phase_changed)
@@ -83,7 +83,7 @@ class ChatPanel(QWidget):
 
     def _on_phase_changed(self, phase, detail):
         icons  = {"checking": "🔍", "downloading": "⬇", "loading": "⚙", "ready": "✅", "error": "❌"}
-        labels = {"checking": "Checking hardware", "downloading": "Downloading model",
+        labels = {"checking": "Checking…", "downloading": "Downloading model",
                   "loading": "Loading model", "ready": "Model ready", "error": "Load error"}
         self._ov_icon.setText(icons.get(phase, "⏳"))
         self._ov_phase.setText(labels.get(phase, phase))
@@ -159,7 +159,7 @@ class ChatPanel(QWidget):
         self.typing = TypingIndicator(); self.typing.hide()
         lay.addWidget(self.typing)
 
-        # Stacked bottom (0=loading, 1=input)
+        # Stacked bottom (0=loading overlay, 1=input)
         self.bottom_stack = QStackedWidget()
         self.bottom_stack.setFixedHeight(240)
 
@@ -203,7 +203,7 @@ class ChatPanel(QWidget):
         self.send.setCursor(Qt.PointingHandCursor); self.send.clicked.connect(self._send)
         il.addWidget(self.inp); il.addWidget(self.send, alignment=Qt.AlignBottom)
         self.bottom_stack.addWidget(ic)        # index 1
-        self.bottom_stack.setCurrentIndex(0)
+        self.bottom_stack.setCurrentIndex(0)   # always start on loading overlay
 
         lay.addWidget(self.bottom_stack)
 
@@ -227,16 +227,16 @@ class ChatPanel(QWidget):
         self.message_sent.emit(text)
         self._chat_history.append({"role": "user", "content": text})
         self.typing.start()
-        if self.agent:
+        # Always route to agent if it exists — never fall back for API mode
+        if self.agent is not None:
             self.agent.enqueue_chat(text, list(self._chat_history[:-1]))
         else:
             QTimer.singleShot(600, self._fallback_reply)
 
     def _fallback_reply(self):
+        """Only called when there is genuinely no agent at all."""
         self.typing.stop()
-        msg = ("Model is loading… I'll be ready to chat shortly."
-               if (self.agent is None or self.agent.model is None)
-               else "Ready — please send your message again.")
+        msg = "No AI agent is running. Please restart Orvion."
         self.db.add_message(self.current_conv, "assistant", msg)
         self._add("assistant", msg)
         self._chat_history.append({"role": "assistant", "content": msg})

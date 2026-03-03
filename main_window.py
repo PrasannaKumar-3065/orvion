@@ -112,20 +112,143 @@ class OrvionWindow(QMainWindow):
             self.chat.bottom_stack.setCurrentIndex(1)
 
     def _execute_tool(self, tool_name: str, args: dict):
-        """Runs on the main thread. Executes browser action and emits result back."""
-        result = "ERROR: Unknown"
+        """
+        Runs on the main thread. Dispatches every supported tool to web_page,
+        then emits the result back to the sleeping AgentWorker thread.
+        """
+        result = "ERROR: unknown tool"
         try:
-            if tool_name == "click":
-                result = self.web_page.click_selector(args["selector"])
+            wp = self.web_page
+            a  = args  # shorthand
+
+            # ── Navigation ────────────────────────────────────────────────────
+            if tool_name == "open_url":
+                wp.open_url(a["url"])
+                wp.wait_for_load(8000)
+                result = "success"
+
+            elif tool_name == "go_back":
+                result = wp.go_back()
+                wp.wait_for_load(5000)
+
+            # ── Click family ──────────────────────────────────────────────────
+            elif tool_name == "click":
+                result = wp.click_selector(a["selector"])
+
+            elif tool_name == "double_click":
+                result = wp.double_click_selector(a["selector"])
+
+            elif tool_name == "right_click":
+                result = wp.right_click_selector(a["selector"])
+
+            elif tool_name == "hover":
+                result = wp.hover_selector(a["selector"])
+
+            # ── Typing ────────────────────────────────────────────────────────
             elif tool_name == "type":
-                result = self.web_page.type_selector(args["selector"], args["text"])
-            elif tool_name == "open_url":
-                self.web_page.open_url(args["url"])
-                result = "NAVIGATED"
+                result = wp.type_selector(a["selector"], a.get("text", ""))
+
+            elif tool_name == "clear_and_type":
+                result = wp.clear_and_type(a["selector"], a.get("text", ""))
+
+            elif tool_name == "press_key":
+                result = wp.press_key(a.get("key", "Enter"), a.get("selector"))
+
+            elif tool_name == "select_option":
+                result = wp.select_option(a["selector"], a.get("value", ""))
+
+            # ── Scroll ────────────────────────────────────────────────────────
+            elif tool_name == "scroll_down":
+                result = wp.scroll_down(a.get("pixels", 300))
+
+            elif tool_name == "scroll_up":
+                result = wp.scroll_up(a.get("pixels", 300))
+
+            elif tool_name == "scroll_to_top":
+                result = wp.scroll_to_top()
+
+            elif tool_name == "scroll_to_bottom":
+                result = wp.scroll_to_bottom()
+
+            elif tool_name == "scroll_to_element":
+                result = wp.scroll_to_element(a["selector"])
+
+            # ── Verify ────────────────────────────────────────────────────────
+            elif tool_name == "verify_text_present":
+                result = wp.verify_text_present(a.get("text", ""))
+
+            elif tool_name == "verify_text_absent":
+                result = wp.verify_text_absent(a.get("text", ""))
+
+            elif tool_name == "verify_element_visible":
+                result = wp.verify_element_visible(a["selector"])
+
+            elif tool_name == "verify_element_enabled":
+                result = wp.verify_element_enabled(a["selector"])
+
+            elif tool_name == "verify_url_contains":
+                result = wp.verify_url_contains(a.get("substring", ""))
+
+            elif tool_name == "verify_page_title":
+                result = wp.verify_page_title(a.get("expected", ""))
+
+            elif tool_name == "verify_input_value":
+                result = wp.verify_input_value(a["selector"], a.get("expected", ""))
+
+            elif tool_name == "verify_element_count":
+                result = wp.verify_element_count(a["selector"], a.get("expected_count", 1))
+
+            # ── Get ───────────────────────────────────────────────────────────
+            elif tool_name == "get_text":
+                result = wp.get_text(a["selector"])
+
+            elif tool_name == "get_current_url":
+                result = wp.get_current_url()
+
+            elif tool_name == "get_page_title":
+                result = wp.get_page_title()
+
+            # ── Wait ──────────────────────────────────────────────────────────
+            elif tool_name == "wait":
+                result = wp.browser_wait(float(a.get("seconds", 1)))
+
+            elif tool_name == "wait_for_element":
+                result = wp.wait_for_element(a["selector"], int(a.get("timeout", 10)))
+
+            elif tool_name == "wait_for_text":
+                result = wp.wait_for_text(a.get("text", ""), int(a.get("timeout", 10)))
+
+            elif tool_name == "wait_for_url_change":
+                result = wp.wait_for_url_change(a.get("expected_substring", ""), int(a.get("timeout", 10)))
+
+            elif tool_name == "wait_for_network_idle":
+                result = wp.wait_for_network_idle(int(a.get("timeout", 10)))
+
+            # ── Meta tools (no browser action, always success) ────────────────
+            elif tool_name in ("raise_bug_ticket", "mark_step_pass", "mark_step_fail",
+                               "mark_flow_blocked", "add_test_comment", "capture_evidence",
+                               "screenshot_diff"):
+                # Log to status bar for visibility
+                label = {
+                    "raise_bug_ticket": f"🐛 Bug: {a.get('title','')[:60]}",
+                    "mark_step_pass":   f"✅ Pass: {a.get('message','')[:60]}",
+                    "mark_step_fail":   f"❌ Fail: {a.get('message','')[:60]}",
+                    "mark_flow_blocked":f"🚫 Blocked: {a.get('message','')[:60]}",
+                    "add_test_comment": f"💬 {a.get('comment','')[:60]}",
+                    "capture_evidence": f"📸 Evidence captured",
+                    "screenshot_diff":  f"🖼 Screenshot diff",
+                }.get(tool_name, tool_name)
+                self._status.setText(label)
+                result = "success"
+
+            else:
+                result = f"ERROR: tool '{tool_name}' not implemented"
+
+        except KeyError as e:
+            result = f"ERROR: missing arg {e} for tool '{tool_name}'"
         except Exception as e:
             result = f"ERROR: {e}"
 
-        # Emit the result back to the sleeping AgentWorker
         self.agent.tool_result_ready.emit(result)
 
     def _provide_browser_state(self):

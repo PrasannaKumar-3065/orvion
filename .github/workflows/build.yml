@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Orvion — Cross-Platform Build Pipeline
+#  Orvion — Cross-Platform Build Pipeline  (API-inference, no ML deps)
 #  ───────────────────────────────────────────────────────────────────────────
 #  Triggers:
 #    • push to main / master
@@ -12,12 +12,15 @@
 #    Linux    │ Orvion-linux-x86_64.AppImage
 #    macOS    │ Orvion-macos-universal.dmg
 #
-#  What is NOT included in the installer:
-#    • The AI model (sanaX3065/Orvion-vl-3b) — downloads on first app launch
-#    • CUDA-specific torch — the first-run wizard upgrades torch if NVIDIA GPU
-#      is detected on the end-user machine
+#  What is NOT included:
+#    • PyTorch / transformers / unsloth / huggingface_hub — not needed
+#    • Any local AI model — inference runs via gradio_client → HuggingFace Space
 #
-#  Secrets required for release signing (all optional — builds succeed without):
+#  Secrets required:
+#    HF_TOKEN         HuggingFace API token — REQUIRED for Space inference
+#                     Add at: Settings → Secrets and variables → Actions
+#
+#  Secrets for release signing (all optional — builds succeed without):
 #    APPLE_IDENTITY   Developer ID Application: ... string
 #    APPLE_TEAM_ID    10-char Apple Team ID
 #    APPLE_ID         Apple ID email
@@ -43,13 +46,13 @@ on:
         type: choice
         options: [ "true", "false" ]
 
-# Cancel in-progress runs for the same branch/PR
+# Cancel in-progress runs for the same branch / PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.10"
+  PYTHON_VERSION: "3.12"       # matches cpython-312 bytecache in repo
   APP_VERSION:    "1.0.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -61,9 +64,8 @@ jobs:
   build-windows:
     name: "Windows — Inno Setup Installer"
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 45          # no model download → much faster
 
-    # ── Map secrets to env vars so they can be used in step if: conditions ──
     env:
       HAS_WIN_CERT: ${{ secrets.WIN_CERT_BASE64 != '' }}
 
@@ -81,48 +83,27 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # ── 3. Dependencies ─────────────────────────────────────────────────────
-      - name: Upgrade pip / wheel
+      # ── 3. Dependencies (API-only — no torch / transformers) ───────────────
+      - name: Upgrade pip / wheel / setuptools
         run: python -m pip install --upgrade pip wheel setuptools
 
-      - name: Install PyQt5 and WebEngine
-        run: pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
-
-      - name: Install PyTorch (CPU build for bundling)
+      - name: Install runtime dependencies
         run: |
-          pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 `
-            --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install ML dependencies
-        run: |
-          pip install `
-            transformers>=4.45.0 `
-            huggingface_hub>=0.24.0 `
-            accelerate>=0.30.0 `
-            safetensors>=0.4.0 `
-            tokenizers>=0.19.0 `
-            qwen-vl-utils>=0.0.8 `
-            Pillow>=10.0.0 `
-            psutil>=5.9.0 `
-            regex `
-            tqdm `
-            requests `
-            pyyaml `
-            packaging `
-            filelock `
-            numpy>=1.24.0
-
-      - name: Install Unsloth (CPU mode for bundling)
-        run: |
-          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" `
-            --no-deps
-        continue-on-error: true
+          pip install ^
+            "PyQt5>=5.15.10" ^
+            "PyQtWebEngine>=5.15.7" ^
+            "Pillow>=10.0.0" ^
+            "psutil>=5.9.0" ^
+            "requests>=2.31.0" ^
+            "gradio_client>=0.7.0" ^
+            "packaging>=23.0" ^
+            "python-dotenv>=1.0.0"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller>=6.0.0
+        run: pip install "pyinstaller>=6.0.0"
 
-      # ── 4. PyInstaller build ─────────────────────────────────────────────────
-      - name: Generate placeholder icon if missing
+      # ── 4. Generate placeholder icon if missing ───────────────────────────
+      - name: Generate placeholder icon
         shell: python
         run: |
           import pathlib
@@ -132,18 +113,31 @@ jobs:
               try:
                   from PIL import Image
                   img = Image.new("RGBA", (256, 256), (108, 78, 230, 255))
-                  img.save(icon_path, format="ICO", sizes=[(16,16),(32,32),(48,48),(256,256)])
+                  img.save(icon_path, format="ICO",
+                           sizes=[(16,16),(32,32),(48,48),(256,256)])
                   print(f"Generated placeholder icon: {icon_path}")
               except Exception as e:
                   print(f"Could not generate icon ({e}) — writing empty file")
                   icon_path.write_bytes(b"")
 
+      # ── 5. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
+      - name: Inject HF_TOKEN into .env
+        shell: powershell
+        run: |
+          $token = "${{ secrets.HF_TOKEN }}"
+          if ($token -eq "") {
+            Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
+          }
+          "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8
+          Write-Host "Wrote .env (token length: $($token.Length))"
+
+      # ── 6. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
         run: pyinstaller orvion.spec --clean --noconfirm
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
 
-      # ── 5. Sign the exe (only when WIN_CERT_BASE64 secret is configured) ────
+      # ── 7. Sign the exe (only when WIN_CERT_BASE64 secret is set) ─────────
       - name: Sign executable (optional)
         if: env.HAS_WIN_CERT == 'true'
         shell: powershell
@@ -159,13 +153,11 @@ jobs:
               "dist\Orvion\Orvion.exe"
           Remove-Item $cert_path -Force
 
-      # ── 6. Inno Setup ────────────────────────────────────────────────────────
+      # ── 7. Inno Setup installer ───────────────────────────────────────────
       - name: Install Inno Setup
         shell: powershell
         run: choco install innosetup --yes --no-progress
 
-      # Download vc_redist into installer/windows/ so setup.iss can bundle it
-      # as a plain local file (Inno Setup cannot fetch URLs at build time)
       - name: Download VC++ Runtime for bundling
         shell: powershell
         run: |
@@ -177,7 +169,7 @@ jobs:
 
       - name: Create output directory
         shell: powershell
-        run: mkdir -Force dist\installer
+        run: New-Item -ItemType Directory -Force -Path dist\installer | Out-Null
 
       - name: Build Inno Setup installer
         shell: powershell
@@ -186,7 +178,7 @@ jobs:
               /DAppVersion="${{ env.APP_VERSION }}" `
               "installer\windows\setup.iss"
 
-      # ── 7. Sign the installer (only when WIN_CERT_BASE64 secret is configured)
+      # ── 8. Sign the installer (optional) ─────────────────────────────────
       - name: Sign installer (optional)
         if: env.HAS_WIN_CERT == 'true'
         shell: powershell
@@ -202,7 +194,7 @@ jobs:
               "dist\installer\OrvionSetup-windows-x64.exe"
           Remove-Item $cert_path -Force
 
-      # ── 8. Upload artifact ────────────────────────────────────────────────────
+      # ── 9. Upload artifact ────────────────────────────────────────────────
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
@@ -218,7 +210,7 @@ jobs:
   build-linux:
     name: "Linux — AppImage"
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
       # ── 1. Source ───────────────────────────────────────────────────────────
@@ -227,7 +219,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── 2. System packages ───────────────────────────────────────────────────
+      # ── 2. System packages needed by PyQtWebEngine + AppImage tools ────────
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -240,6 +232,11 @@ jobs:
             libfreetype6 \
             libx11-6 \
             libxcb1 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-render-util0 \
+            libxcb-xinerama0 \
             libxext6 \
             libxrender1 \
             libxkbcommon0 \
@@ -272,48 +269,27 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # ── 4. Dependencies ─────────────────────────────────────────────────────
-      - name: Upgrade pip / wheel
+      # ── 4. Dependencies (API-only — no torch / transformers) ───────────────
+      - name: Upgrade pip / wheel / setuptools
         run: python -m pip install --upgrade pip wheel setuptools
 
-      - name: Install PyQt5 and WebEngine
-        run: pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
-
-      - name: Install PyTorch (CPU build for bundling)
-        run: |
-          pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 \
-            --index-url https://download.pytorch.org/whl/cpu
-
-      - name: Install ML dependencies
+      - name: Install runtime dependencies
         run: |
           pip install \
-            transformers>=4.45.0 \
-            huggingface_hub>=0.24.0 \
-            accelerate>=0.30.0 \
-            safetensors>=0.4.0 \
-            tokenizers>=0.19.0 \
-            qwen-vl-utils>=0.0.8 \
-            Pillow>=10.0.0 \
-            psutil>=5.9.0 \
-            regex \
-            tqdm \
-            requests \
-            pyyaml \
-            packaging \
-            filelock \
-            numpy>=1.24.0
-
-      - name: Install Unsloth (CPU mode for bundling)
-        run: |
-          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" \
-            --no-deps
-        continue-on-error: true
+            "PyQt5>=5.15.10" \
+            "PyQtWebEngine>=5.15.7" \
+            "Pillow>=10.0.0" \
+            "psutil>=5.9.0" \
+            "requests>=2.31.0" \
+            "gradio_client>=0.7.0" \
+            "packaging>=23.0" \
+            "python-dotenv>=1.0.0"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller>=6.0.0
+        run: pip install "pyinstaller>=6.0.0"
 
-      # ── 5. PyInstaller build ─────────────────────────────────────────────────
-      - name: Generate placeholder icon if missing
+      # ── 5. Generate placeholder icon if missing ────────────────────────────
+      - name: Generate placeholder icon
         run: |
           mkdir -p installer/linux
           if [ ! -f installer/linux/orvion.png ]; then
@@ -325,12 +301,23 @@ jobs:
           " || echo "Warning: could not generate icon"
           fi
 
+      # ── 6. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
+      - name: Inject HF_TOKEN into .env
+        run: |
+          TOKEN="${{ secrets.HF_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::HF_TOKEN secret is not set — Space calls may fail at runtime"
+          fi
+          echo "HF_TOKEN=${TOKEN}" > .env
+          echo "Wrote .env (token length: ${#TOKEN})"
+
+      # ── 7. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
         run: pyinstaller orvion.spec --clean --noconfirm
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
 
-      # ── 6. Build AppImage ─────────────────────────────────────────────────────
+      # ── 8. Build AppImage ─────────────────────────────────────────────────
       - name: Make scripts executable
         run: chmod +x installer/linux/build_appimage.sh installer/linux/AppRun
 
@@ -339,7 +326,7 @@ jobs:
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
 
-      # ── 7. Upload artifact ────────────────────────────────────────────────────
+      # ── 8. Upload artifact ────────────────────────────────────────────────
       - name: Upload Linux AppImage
         uses: actions/upload-artifact@v4
         with:
@@ -355,9 +342,8 @@ jobs:
   build-macos:
     name: "macOS — DMG"
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 45
 
-    # ── Map secrets to env vars so they can be used in step if: conditions ──
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_IDENTITY != '' }}
 
@@ -379,46 +365,27 @@ jobs:
       - name: Install Homebrew tools
         run: brew install create-dmg upx || true
 
-      # ── 4. Dependencies ─────────────────────────────────────────────────────
-      - name: Upgrade pip / wheel
+      # ── 4. Dependencies (API-only — no torch / transformers) ───────────────
+      - name: Upgrade pip / wheel / setuptools
         run: python -m pip install --upgrade pip wheel setuptools
 
-      - name: Install PyQt5 and WebEngine
-        run: pip install PyQt5>=5.15.10 PyQtWebEngine>=5.15.7
-
-      - name: Install PyTorch (CPU build for bundling)
-        run: pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2
-
-      - name: Install ML dependencies
+      - name: Install runtime dependencies
         run: |
           pip install \
-            transformers>=4.45.0 \
-            huggingface_hub>=0.24.0 \
-            accelerate>=0.30.0 \
-            safetensors>=0.4.0 \
-            tokenizers>=0.19.0 \
-            qwen-vl-utils>=0.0.8 \
-            Pillow>=10.0.0 \
-            psutil>=5.9.0 \
-            regex \
-            tqdm \
-            requests \
-            pyyaml \
-            packaging \
-            filelock \
-            numpy>=1.24.0
-
-      - name: Install Unsloth (CPU mode for bundling)
-        run: |
-          pip install "unsloth @ git+https://github.com/unslothai/unsloth.git" \
-            --no-deps
-        continue-on-error: true
+            "PyQt5>=5.15.10" \
+            "PyQtWebEngine>=5.15.7" \
+            "Pillow>=10.0.0" \
+            "psutil>=5.9.0" \
+            "requests>=2.31.0" \
+            "gradio_client>=0.7.0" \
+            "packaging>=23.0" \
+            "python-dotenv>=1.0.0"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller>=6.0.0
+        run: pip install "pyinstaller>=6.0.0"
 
-      # ── 5. Generate icon and build ────────────────────────────────────────────
-      - name: Generate placeholder icon if missing
+      # ── 5. Generate icon and build ────────────────────────────────────────
+      - name: Generate placeholder icon
         run: |
           mkdir -p installer/macos
           if [ ! -f installer/macos/orvion.icns ]; then
@@ -438,19 +405,29 @@ jobs:
           " || echo "Warning: could not generate .icns"
           fi
 
+      # ── 5. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
+      - name: Inject HF_TOKEN into .env
+        run: |
+          TOKEN="${{ secrets.HF_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::HF_TOKEN secret is not set — Space calls may fail at runtime"
+          fi
+          echo "HF_TOKEN=${TOKEN}" > .env
+          echo "Wrote .env (token length: ${#TOKEN})"
+
       - name: Build with PyInstaller
         run: pyinstaller orvion.spec --clean --noconfirm
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
 
-      # ── 6. Ad-hoc sign (always — lets the app open on any Mac without Gatekeeper prompt)
+      # ── 6. Ad-hoc sign (lets the app open without Gatekeeper prompt) ───────
       - name: Ad-hoc code sign
         run: |
           codesign --force --deep --sign - \
             --entitlements installer/macos/entitlements.plist \
             dist/Orvion.app || true
 
-      # ── 7. Full Developer ID sign (only when APPLE_IDENTITY secret is configured)
+      # ── 7. Developer ID sign (only when APPLE_IDENTITY secret is set) ──────
       - name: Developer ID code sign (optional)
         if: env.HAS_APPLE_CERT == 'true'
         run: |
@@ -462,7 +439,7 @@ jobs:
             --sign "${{ secrets.APPLE_IDENTITY }}" \
             dist/Orvion.app
 
-      # ── 8. Build DMG ─────────────────────────────────────────────────────────
+      # ── 8. Build DMG ──────────────────────────────────────────────────────
       - name: Make DMG build script executable
         run: chmod +x installer/macos/build_dmg.sh
 
@@ -475,7 +452,7 @@ jobs:
           APPLE_ID:       ${{ secrets.APPLE_ID }}
           APPLE_APP_PWD:  ${{ secrets.APPLE_APP_PWD }}
 
-      # ── 9. Upload artifact ────────────────────────────────────────────────────
+      # ── 9. Upload artifact ────────────────────────────────────────────────
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
@@ -550,14 +527,10 @@ jobs:
             | Linux x86_64 | `Orvion-linux-x86_64.AppImage` | `chmod +x` then run |
             | macOS 12+ | `Orvion-macos-universal.dmg` | Open DMG, drag to Applications |
 
-            ### First Launch
-            On the very first launch a **setup wizard** appears automatically:
-            1. Detects your GPU (NVIDIA supported)
-            2. Installs CUDA-accelerated PyTorch if a GPU is found
-            3. Downloads the **Orvion-VL 3B AI model** (~6 GB) from Hugging Face
-            4. All subsequent launches are fully **offline**
-
-            > Disk space required: ~4 GB (app) + ~6 GB (AI model in user profile)
+            ### About this build
+            Orvion runs in **API mode** — all AI inference is handled remotely via
+            a HuggingFace Space. No local GPU, no PyTorch, no model download required.
+            The installer is lightweight (~150 MB) and launches instantly.
 
             ### SHA-256 Checksums
             See `SHA256SUMS.txt` attached below.

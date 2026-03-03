@@ -1,171 +1,107 @@
 # -*- mode: python ; coding: utf-8 -*-
 # ─────────────────────────────────────────────────────────────────────────────
-#  Orvion — PyInstaller spec
+#  Orvion — PyInstaller spec  (API-only build)
 #
-#  Builds a one-directory bundle.  The CI workflow then wraps the directory
-#  into a platform-native installer (Inno Setup / AppImage / DMG).
+#  Bundled:     PyQt5, PyQtWebEngine, Pillow, requests, gradio_client, stdlib
+#  NOT bundled: torch, transformers, unsloth, huggingface_hub, numpy, etc.
 #
-#  Build command:
-#    pyinstaller orvion.spec --clean --noconfirm
+#  All AI inference is done remotely via gradio_client → HuggingFace Space.
+#  No local model, no GPU required on the end-user machine.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import sys
-import os
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all
 
-# ── Collect heavy packages ────────────────────────────────────────────────────
-# collect_all returns (datas, binaries, hiddenimports)
-tf_data,    tf_bin,    tf_hidden    = collect_all("transformers")
-hf_data,    hf_bin,    hf_hidden    = collect_all("huggingface_hub")
-tok_data,   tok_bin,   tok_hidden   = collect_all("tokenizers")
-qwen_data,  qwen_bin,  qwen_hidden  = collect_all("qwen_vl_utils")
-acc_data,   acc_bin,   acc_hidden   = collect_all("accelerate")
-safe_data,  safe_bin,  safe_hidden  = collect_all("safetensors")
-pil_data,   pil_bin,   pil_hidden   = collect_all("PIL")
-reg_data,   reg_bin,   reg_hidden   = collect_all("regex")
+# ── Collect data/binaries for packages that need it ──────────────────────────
+pil_datas,     pil_bins,     pil_hidden     = collect_all("PIL")
+req_datas,     req_bins,     req_hidden     = collect_all("requests")
+gradio_datas,  gradio_bins,  gradio_hidden  = collect_all("gradio_client")
 
-# torch — bundled as CPU; the bootstrap upgrades to CUDA at first run
-torch_data,   torch_bin,   torch_hidden   = collect_all("torch")
-vision_data,  vision_bin,  vision_hidden  = collect_all("torchvision")
-
-# unsloth — may be CPU-only on build machine; that is intentional
-try:
-    uns_data, uns_bin, uns_hidden = collect_all("unsloth")
-except Exception:
-    uns_data, uns_bin, uns_hidden = [], [], []
-
-# ── Aggregate ─────────────────────────────────────────────────────────────────
-ALL_DATAS = (
-    tf_data + hf_data + tok_data + qwen_data + acc_data +
-    safe_data + pil_data + reg_data + torch_data + vision_data +
-    uns_data
-)
-ALL_BINS = (
-    tf_bin + hf_bin + tok_bin + qwen_bin + acc_bin +
-    safe_bin + pil_bin + reg_bin + torch_bin + vision_bin +
-    uns_bin
-)
-ALL_HIDDEN = (
-    tf_hidden + hf_hidden + tok_hidden + qwen_hidden + acc_hidden +
-    safe_hidden + pil_hidden + reg_hidden + torch_hidden + vision_hidden +
-    uns_hidden +
-    # Explicit extras that static analysis often misses
-    collect_submodules("transformers.models") +
-    collect_submodules("transformers.pipelines") +
-    collect_submodules("huggingface_hub") +
-    collect_submodules("tokenizers") +
-    collect_submodules("torch") +
-    [
-        # PyQt5 / WebEngine
-        "PyQt5",
-        "PyQt5.QtCore",
-        "PyQt5.QtGui",
-        "PyQt5.QtWidgets",
-        "PyQt5.QtWebEngineWidgets",
-        "PyQt5.QtWebEngine",
-        "PyQt5.QtNetwork",
-        "PyQt5.QtPrintSupport",
-        # App modules
-        "database",
-        "styles",
-        "constants",
-        "inference_helpers",
-        "agent_worker",
-        "main_window",
-        "first_run_bootstrap",
-        "widgets",
-        "widgets.edge_handle",
-        "widgets.titlebar",
-        "widgets.message_widget",
-        "widgets.sidebar",
-        "widgets.chat_panel",
-        "widgets.web_engine",
-        "widgets.editor_panel",
-        # Stdlib extras
-        "sqlite3",
-        "email",
-        "email.mime",
-        "email.mime.text",
-        "urllib",
-        "urllib.parse",
-        "urllib.request",
-        "xml",
-        "xml.etree",
-        "xml.etree.ElementTree",
-        # ML extras
-        "numpy",
-        "scipy",
-        "packaging",
-        "filelock",
-        "requests",
-        "tqdm",
-        "yaml",
-        "pyyaml",
-    ]
-)
-
-# ── Excludes ──────────────────────────────────────────────────────────────────
-EXCLUDES = [
-    # Test suites
-    "unittest", "doctest", "pdb", "pydoc",
-    # Unused ML backends
-    "tensorflow", "jax", "flax", "paddle",
-    # Jupyter / IPython
-    "IPython", "jupyter", "notebook",
-    # Build tools
-    "setuptools", "distutils", "pip",
-    # Other UI toolkits
-    "tkinter", "wx", "gi",
-    # Heavy unused
-    "matplotlib", "scipy.signal", "scipy.fft",
+ALL_DATAS  = pil_datas  + req_datas  + gradio_datas
+ALL_BINS   = pil_bins   + req_bins   + gradio_bins
+ALL_HIDDEN = pil_hidden + req_hidden + gradio_hidden + [
+    # ── PyQt5 ──────────────────────────────────────────────────────────────
+    "PyQt5",
+    "PyQt5.QtCore",
+    "PyQt5.QtGui",
+    "PyQt5.QtWidgets",
+    "PyQt5.QtWebEngineWidgets",
+    "PyQt5.QtWebEngine",
+    "PyQt5.QtNetwork",
+    "PyQt5.QtPrintSupport",
+    # ── App modules ────────────────────────────────────────────────────────
+    "database",
+    "styles",
+    "constants",
+    "inference_helpers",
+    "agent_worker",
+    "main_window",
+    "first_run_bootstrap",
+    "widgets",
+    "widgets.edge_handle",
+    "widgets.titlebar",
+    "widgets.message_widget",
+    "widgets.sidebar",
+    "widgets.chat_panel",
+    "widgets.web_engine",
+    "widgets.editor_panel",
+    # ── Stdlib ─────────────────────────────────────────────────────────────
+    "sqlite3",
+    "urllib",
+    "urllib.parse",
+    "urllib.request",
+    "urllib.error",
+    "json",
+    "base64",
+    "pathlib",
+    "threading",
+    "email",
+    "email.mime",
+    "email.mime.text",
+    "xml",
+    "xml.etree",
+    "xml.etree.ElementTree",
+    "ssl",
+    "http",
+    "http.client",
+    "dotenv",
 ]
 
-# ── Analysis ──────────────────────────────────────────────────────────────────
+# ── Packages to hard-exclude (keeps the installer small) ─────────────────────
+EXCLUDES = [
+    # ML / local-model stack — not used in API build
+    "torch", "torchvision", "torchaudio",
+    "transformers", "tokenizers",
+    "unsloth",
+    "accelerate", "safetensors", "bitsandbytes",
+    "huggingface_hub",
+    "qwen_vl_utils",
+    "numpy", "scipy", "sklearn", "pandas",
+    # Other unused heavy deps
+    "tensorflow", "jax", "flax",
+    "IPython", "jupyter", "notebook",
+    "matplotlib",
+    "unittest", "doctest", "pdb", "pydoc",
+    "setuptools", "distutils", "pip",
+    "tkinter", "wx", "gi",
+    "pytest", "mypy",
+]
+
 a = Analysis(
-    ["launcher.py"],           # ← entry point (not main.py directly)
+    ["launcher.py"],
     pathex=["."],
     binaries=ALL_BINS,
     datas=ALL_DATAS,
     hiddenimports=ALL_HIDDEN,
-    hookspath=["hooks"],       # custom hooks in ./hooks/
+    hookspath=[],           # no custom hooks needed — ML packages are excluded
     hooksconfig={},
-    runtime_hooks=["rthooks/rthook_torch.py"],
+    runtime_hooks=[],
     excludes=EXCLUDES,
     noarchive=False,
 )
 
-# ── Purge duplicate/unwanted ──────────────────────────────────────────────────
-# Remove .pyc test files and avoid pulling in CUDA libs (CPU build)
-# (CUDA libs will be installed at runtime by the bootstrap)
-def _filter(entries, patterns):
-    import fnmatch
-    out = []
-    for entry in entries:
-        dest = entry[1] if isinstance(entry, tuple) else str(entry)
-        if not any(fnmatch.fnmatch(dest.lower(), p) for p in patterns):
-            out.append(entry)
-    return out
-
-SKIP_PATTERNS = [
-    "*test*",
-    "*/__pycache__/*",
-    "*/tests/*",
-    # CUDA shared libs — large & only needed with GPU torch (installed at runtime)
-    "*/libcublas*",
-    "*/libcudart*",
-    "*/libnvrtc*",
-    "*/libcufft*",
-    "*/libcusparse*",
-    "*/libcurand*",
-    "*/nvcuda.dll",
-]
-a.datas    = _filter(a.datas, SKIP_PATTERNS)
-a.binaries = _filter(a.binaries, SKIP_PATTERNS)
-
-# ── PYZ archive ───────────────────────────────────────────────────────────────
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-# ── EXE stub ──────────────────────────────────────────────────────────────────
 exe = EXE(
     pyz,
     a.scripts,
@@ -175,21 +111,20 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,           # compress if UPX is on PATH
-    console=False,      # no console window on Windows
+    upx=False,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=(
-        "installer/windows/orvion.ico"  if sys.platform == "win32" else
-        "installer/macos/orvion.icns"   if sys.platform == "darwin" else
+        "installer/windows/orvion.ico" if sys.platform == "win32"  else
+        "installer/macos/orvion.icns"  if sys.platform == "darwin" else
         "installer/linux/orvion.png"
     ),
 )
 
-# ── Collect all into one directory ────────────────────────────────────────────
 coll = COLLECT(
     exe,
     a.binaries,
@@ -197,15 +132,10 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    upx_exclude=[
-        "vcruntime140.dll",
-        "python3*.dll",
-        "Qt5*.dll",
-    ],
-    name="Orvion",     # → dist/Orvion/
+    upx_exclude=["vcruntime140.dll", "python3*.dll", "Qt5*.dll"],
+    name="Orvion",
 )
 
-# ── macOS .app bundle ─────────────────────────────────────────────────────────
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
@@ -213,14 +143,11 @@ if sys.platform == "darwin":
         icon="installer/macos/orvion.icns",
         bundle_identifier="com.orvion.app",
         info_plist={
-            "NSPrincipalClass":                    "NSApplication",
-            "NSHighResolutionCapable":             True,
-            "CFBundleShortVersionString":          "1.0.0",
-            "CFBundleVersion":                     "1.0.0",
-            "CFBundleName":                        "Orvion",
-            "CFBundleDisplayName":                 "Orvion AI",
-            "NSHumanReadableCopyright":            "© 2025 Orvion",
-            "NSMicrophoneUsageDescription":        "",
-            "NSCameraUsageDescription":            "",
+            "NSPrincipalClass":           "NSApplication",
+            "NSHighResolutionCapable":    True,
+            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleName":               "Orvion",
+            "CFBundleDisplayName":        "Orvion AI",
+            "NSHumanReadableCopyright":   "© 2025 Orvion",
         },
     )
