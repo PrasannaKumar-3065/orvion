@@ -120,20 +120,23 @@ jobs:
                   print(f"Could not generate icon ({e}) — writing empty file")
                   icon_path.write_bytes(b"")
 
-      # ── 5. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
+      # ── 5. Write .env safely using env variables ───────────────────────────
       - name: Inject HF_TOKEN into .env
         shell: powershell
+        env:
+          # This safely maps the secret to an environment variable
+          TEMP_HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Check if token is empty and issue warning
-          $token = "${{ secrets.HF_TOKEN }}"
-          if ($token -eq "") {
+          # Read from the env variable, not the GitHub context directly
+          $token = $env:TEMP_HF_TOKEN
+          
+          if ([string]::IsNullOrWhiteSpace($token)) {
               Write-Warning "HF_TOKEN secret is not set — Space calls may fail at runtime"
           }
           
-          # Write HF_TOKEN to .env file
-          "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8
+          # Write HF_TOKEN to .env file safely
+          "HF_TOKEN=$token" | Out-File -FilePath .env -Encoding utf8 -NoNewline
           
-          # Output token length
           Write-Host "Wrote .env (token length: $($token.Length))"
 
       # ── 6. PyInstaller build ──────────────────────────────────────────────
