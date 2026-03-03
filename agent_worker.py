@@ -3,14 +3,17 @@ agent_worker.py
 ───────────────
 Two modes, same Qt signals.
 
-  API mode   → calls HuggingFace Space via gradio_client.
+  API mode   → HuggingFace Space via direct HTTP (no gradio_client schema fetch).
   Local mode → torch + unsloth, lazy imported.
 
-ReAct loop format matches training data exactly:
-  - System: Aegis system prompt + tool list
-  - User:   screenshot + <CONTEXT_BLOCK>[DOM][OBSERVATIONS: prev thought/action/result]</CONTEXT_BLOCK> + goal
-  - Same goal every step; only the single previous step in OBSERVATIONS.
-  - Loop ends on [GOAL ACHIEVED], [FLOW BLOCKED], action=None, or max steps.
+WHY DIRECT HTTP:
+  gradio_client calls /info (or /api/info) before any prediction to fetch the
+  Space schema. If the bundled gradio_client version mismatches the live Space's
+  Gradio version, this returns {"detail":"Not Found"} and crashes — even for a
+  public Space with a valid HF_TOKEN.
+
+  Fix: use the Gradio queue REST API directly (POST /queue/join + SSE /queue/data).
+  No schema fetch needed. gradio_client is kept only as a fallback.
 """
 
 import re
@@ -64,39 +67,132 @@ def _build_prompt(messages: list) -> str:
 
 
 # ── Space client ──────────────────────────────────────────────────────────────
+#
+# Primary path: raw Gradio queue HTTP — no gradio_client import, no /info call.
+#   1. POST {url}/queue/join   body={"data":[...], "fn_index":0, "session_hash":"..."}
+#   2. GET  {url}/queue/data?session_hash=...   (SSE stream)
+#   3. When msg=="process_completed" → return output.data[0]
+#
+# Works on Gradio 3.x and 4.x regardless of installed gradio_client version.
+# Falls back to gradio_client if the direct path raises any exception.
+# ─────────────────────────────────────────────────────────────────────────────
 
 class _SpaceClient:
     def __init__(self, space_url: str):
-        self.space_url = space_url
-        self._client   = None
+        self.space_url = space_url.rstrip("/")
 
-    def _get_client(self):
-        if self._client is None:
+    # ── Direct HTTP ───────────────────────────────────────────────────────────
+
+    def _call_direct(self, prompt_text: str, image_bytes=None) -> str:
+        import urllib.request
+        import urllib.parse
+        import uuid
+        import time
+
+        session_hash = uuid.uuid4().hex
+        hf_token     = os.getenv("HF_TOKEN", "")
+        auth_hdr     = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+
+        # Optional: upload screenshot → get file ref dict back
+        image_ref = None
+        if image_bytes is not None:
             try:
-                from gradio_client import Client
-                HF_TOKEN = os.getenv("HF_TOKEN")
-                try:
-                    self._client = Client(self.space_url, hf_token=HF_TOKEN)
-                except TypeError:
-                    self._client = Client(self.space_url, token=HF_TOKEN)
-            except ImportError:
-                raise RuntimeError("gradio_client not installed. Run: pip install gradio_client")
-        return self._client
+                image_ref = self._upload_file(image_bytes, hf_token)
+            except Exception:
+                image_ref = None   # text-only fallback is fine
 
-    def generate(self, prompt_text: str, image=None) -> str:
-        client    = self._get_client()
+        # POST /queue/join
+        body = json.dumps({
+            "data":         [prompt_text, image_ref],
+            "fn_index":     0,
+            "session_hash": session_hash,
+        }).encode()
+        req = urllib.request.Request(
+            f"{self.space_url}/queue/join",
+            data=body,
+            headers={"Content-Type": "application/json", **auth_hdr},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                jr = json.loads(r.read())
+        except Exception as e:
+            raise RuntimeError(f"queue/join failed: {e}")
+        if "error" in jr:
+            raise RuntimeError(f"queue/join error: {jr['error']}")
+
+        # GET /queue/data  (SSE stream)
+        qs = f"session_hash={urllib.parse.quote(session_hash)}"
+        if hf_token:
+            qs += f"&__hf_token={urllib.parse.quote(hf_token)}"
+        sse_req = urllib.request.Request(
+            f"{self.space_url}/queue/data?{qs}",
+            headers={"Accept": "text/event-stream",
+                     "Cache-Control": "no-cache", **auth_hdr},
+        )
+        buf      = ""
+        deadline = time.time() + 180
+        with urllib.request.urlopen(sse_req, timeout=180) as sse:
+            while time.time() < deadline:
+                chunk = sse.read(4096)
+                if not chunk:
+                    break
+                buf += chunk.decode("utf-8", errors="replace")
+                while "\n\n" in buf:
+                    msg, buf = buf.split("\n\n", 1)
+                    for line in msg.split("\n"):
+                        if not line.startswith("data:"):
+                            continue
+                        try:
+                            ev = json.loads(line[5:].strip())
+                        except Exception:
+                            continue
+                        mt = ev.get("msg", "")
+                        if mt == "process_completed":
+                            out = ev.get("output", {}).get("data", [])
+                            return str(out[0]).strip() if out else ""
+                        if mt == "queue_full":
+                            raise RuntimeError("Space queue is full — retry shortly")
+        raise RuntimeError("SSE stream ended without a result")
+
+    def _upload_file(self, image_bytes: bytes, hf_token: str) -> dict:
+        """Upload a PNG screenshot to the Space, return the file reference dict."""
+        import urllib.request
+        import uuid
+        boundary = uuid.uuid4().hex
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="files"; filename="shot.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode() + image_bytes + f"\r\n--{boundary}--\r\n".encode()
+        hdrs = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        if hf_token:
+            hdrs["Authorization"] = f"Bearer {hf_token}"
+        req = urllib.request.Request(
+            f"{self.space_url}/upload",
+            data=body, headers=hdrs, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            result = json.loads(r.read())
+        return result[0] if isinstance(result, list) and result else result
+
+    # ── gradio_client fallback ────────────────────────────────────────────────
+
+    def _call_gradio_client(self, prompt_text: str, image_bytes=None) -> str:
+        """Secondary path — may fail on gradio_client version mismatch."""
+        from gradio_client import Client
+        hf_token = os.getenv("HF_TOKEN")
+        try:
+            client = Client(self.space_url, hf_token=hf_token)
+        except TypeError:
+            client = Client(self.space_url, token=hf_token)
         image_arg = None
-        if image is not None:
+        if image_bytes is not None:
             import tempfile
             from gradio_client import handle_file
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-            if isinstance(image, bytes):
-                tmp.write(image)
-            else:
-                image.save(tmp.name)
+            tmp.write(image_bytes)
             tmp.close()
             image_arg = handle_file(tmp.name)
-
         result = client.predict(
             prompt_text=prompt_text,
             image_file=image_arg,
@@ -104,11 +200,27 @@ class _SpaceClient:
         )
         return str(result).strip()
 
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    def generate(self, prompt_text: str, image=None) -> str:
+        """Direct HTTP first; gradio_client fallback on failure."""
+        try:
+            return self._call_direct(prompt_text, image_bytes=image)
+        except Exception as direct_err:
+            try:
+                return self._call_gradio_client(prompt_text, image_bytes=image)
+            except Exception as gc_err:
+                raise RuntimeError(
+                    f"Both call methods failed.\n"
+                    f"  Direct HTTP:   {direct_err}\n"
+                    f"  gradio_client: {gc_err}"
+                )
+
     def chat(self, messages: list, image_bytes: bytes = None) -> str:
         return self.generate(_build_prompt(messages), image=image_bytes)
 
 
-# ── Tool list (no email tools) ────────────────────────────────────────────────
+# ── Tool list ─────────────────────────────────────────────────────────────────
 
 TOOL_LIST = (
     "click, type, clear_and_type, open_url, press_key, select_option, hover, "
@@ -165,8 +277,8 @@ class AgentWorker(QThread):
         self._pending_tool_result = None
         self.chat_queue           = []
         self.lock                 = threading.Lock()
-        self.model                = None   # local mode only
-        self.processor            = None   # local mode only
+        self.model                = None
+        self.processor            = None
 
         cfg       = _load_config()
         self.mode = cfg.get("mode", "api")
@@ -193,26 +305,30 @@ class AgentWorker(QThread):
         return re.findall(r'[a-z0-9]+', text.lower())
 
     def _bm25_score(self, query_tokens, doc_tokens, k1=1.5, b=0.75, avg_dl=8.0):
-        if not doc_tokens: return 0.0
+        if not doc_tokens:
+            return 0.0
         dl   = len(doc_tokens)
         freq = {t: doc_tokens.count(t) for t in set(query_tokens) & set(doc_tokens)}
         score = 0.0
         for qt in query_tokens:
             f = freq.get(qt, 0)
-            if f == 0: continue
+            if f == 0:
+                continue
             tf    = (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avg_dl))
             score += math.log(2.0) * tf
         return score
 
     def retrieve_dom_context(self, dom, goal, top_k=30, viewport_bonus=2.0):
-        if not dom: return []
+        if not dom:
+            return []
         q_tok  = self._tokenize(goal)
         scored = []
         for el in dom:
-            doc   = " ".join(filter(None, [el.get("text",""), el.get("tag",""),
-                                           el.get("type",""), el.get("selector","")]))
+            doc   = " ".join(filter(None, [el.get("text", ""), el.get("tag", ""),
+                                           el.get("type", ""), el.get("selector", "")]))
             score = self._bm25_score(q_tok, self._tokenize(doc))
-            if el.get("in_viewport"): score *= viewport_bonus
+            if el.get("in_viewport"):
+                score *= viewport_bonus
             scored.append((score, el))
         scored.sort(key=lambda x: (-x[0], x[1].get("vp_top", 9999)))
         top = [el for s, el in scored if s > 0][:top_k]
@@ -236,31 +352,25 @@ class AgentWorker(QThread):
     }
 
     def extract_action(self, text: str):
-        """
-        Parse Action: line from model output.
-        Returns dict with 'tool' and 'args', or None if action is absent/none.
-        Returns {"tool": "__parse_error__"} on malformed JSON.
-        """
         m = re.search(r"^Action:\s*(.+)$", text, re.MULTILINE)
         if not m:
             return None
         raw = m.group(1).strip()
         if raw.lower() in ("none", "null", ""):
             return None
-        # Normalise quotes
         raw = (raw.replace("\u2018", "'").replace("\u2019", "'")
                   .replace("\u201c", '"').replace("\u201d", '"'))
         raw = re.sub(r'[^\x00-\x7F]+', '', raw)
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            raw2 = raw.replace("'", '"')
             try:
-                parsed = json.loads(raw2)
+                parsed = json.loads(raw.replace("'", '"'))
             except Exception:
                 return {"tool": "__parse_error__", "args": {}}
         if isinstance(parsed, list):
-            valid = [a for a in parsed if isinstance(a, dict) and a.get("tool") in self.VALID_TOOLS]
+            valid = [a for a in parsed
+                     if isinstance(a, dict) and a.get("tool") in self.VALID_TOOLS]
             return valid[0] if valid else {"tool": "__parse_error__", "args": {}}
         if isinstance(parsed, dict) and parsed.get("tool") in self.VALID_TOOLS:
             return parsed
@@ -293,13 +403,12 @@ class AgentWorker(QThread):
             import torch
             if torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
-                self.hw_info.emit(True, props.total_memory / (1024**3),
+                self.hw_info.emit(True, props.total_memory / (1024 ** 3),
                                   16.0, torch.cuda.get_device_name(0))
             else:
                 self.hw_info.emit(False, 0.0, 0.0, "CPU")
         except ImportError:
             self.hw_info.emit(False, 0.0, 0.0, "torch not installed")
-
         try:
             from constants import REPO_ID
             from unsloth import FastVisionModel
@@ -313,7 +422,6 @@ class AgentWorker(QThread):
         except Exception as e:
             self.phase_changed.emit("error", f"Model Load Error: {e}")
             return
-
         self._main_loop()
 
     def _main_loop(self):
@@ -332,10 +440,8 @@ class AgentWorker(QThread):
     def _chat_inference(self, user_text: str, history: list):
         needs_agent = any(t in user_text.lower() for t in AGENTIC_TRIGGERS)
         try:
-            if needs_agent:
-                result = self._react_loop(user_text)
-            else:
-                result = self._plain_chat(user_text, history)
+            result = self._react_loop(user_text) if needs_agent else \
+                     self._plain_chat(user_text, history)
         except Exception as e:
             result = f"[Error] {e}"
         self.chat_reply.emit(result)
@@ -343,7 +449,9 @@ class AgentWorker(QThread):
     # ── Plain chat ────────────────────────────────────────────────────────────
 
     def _plain_chat(self, user_text: str, history: list) -> str:
-        messages = [{"role": "system", "content": "You are Orvion, a helpful AI assistant. Answer clearly and concisely."}]
+        messages = [{"role": "system",
+                     "content": "You are Orvion, a helpful AI assistant. "
+                                "Answer clearly and concisely."}]
         for h in history[-4:]:
             messages.append({"role": h["role"], "content": h["content"]})
         messages.append({"role": "user", "content": user_text})
@@ -356,14 +464,18 @@ class AgentWorker(QThread):
             return "[Error] Local model not loaded."
         try:
             import torch
-            fmt = [{"role": m["role"], "content": [{"type": "text", "text": m["content"]}]}
+            fmt = [{"role": m["role"],
+                    "content": [{"type": "text", "text": m["content"]}]}
                    for m in messages]
-            input_text = self.processor.apply_chat_template(fmt, tokenize=False, add_generation_prompt=True)
-            inputs = self.processor(text=[input_text], padding=True, return_tensors="pt").to("cuda")
+            input_text = self.processor.apply_chat_template(
+                fmt, tokenize=False, add_generation_prompt=True)
+            inputs = self.processor(
+                text=[input_text], padding=True, return_tensors="pt").to("cuda")
             with torch.inference_mode():
                 outputs = self.model.generate(**inputs, max_new_tokens=250, do_sample=False)
             generated = outputs[:, inputs["input_ids"].shape[1]:]
-            return self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+            return self.processor.batch_decode(
+                generated, skip_special_tokens=True)[0].strip()
         except Exception as e:
             return f"[Error] Plain chat failed: {e}"
 
@@ -371,27 +483,22 @@ class AgentWorker(QThread):
 
     def _react_loop(self, goal: str, max_steps: int = 40) -> str:
         """
-        Clean single-observation ReAct loop matching training data format.
-
-        Each step sends:
-          System: Aegis system prompt
-          User:   [screenshot] + <CONTEXT_BLOCK>[DOM][OBSERVATIONS: prev step only]</CONTEXT_BLOCK> + goal
-
-        The goal is ALWAYS the original user query - never changes.
-        OBSERVATIONS contains only the immediately previous thought/action/result.
-        Loop ends on [GOAL ACHIEVED], [FLOW BLOCKED], action=None, or max_steps.
+        Single-observation ReAct loop matching training data format.
+        Same goal every step. OBSERVATIONS = only the previous step.
+        Terminates on [GOAL ACHIEVED], [FLOW BLOCKED], action=None, stale x3, or max_steps.
         """
-        last_obs: dict = {}
-        stale_count = 0
+        last_obs: dict  = {}
+        stale_count     = 0
         last_action_sig = None
 
         for step in range(1, max_steps + 1):
-            # ── 1. Capture browser state ──────────────────────────────────────
+            # ── 1. Browser state ──────────────────────────────────────────────
             self.browser_state = None
             self.request_browser_state.emit()
             waited = 0
             while self.browser_state is None and waited < 15000:
-                self.msleep(50); waited += 50
+                self.msleep(50)
+                waited += 50
             if not self.browser_state:
                 self.step_log.emit("Warning: Browser state timeout - skipping step")
                 continue
@@ -400,7 +507,7 @@ class AgentWorker(QThread):
             dom          = json.loads(dom_raw) if isinstance(dom_raw, str) else dom_raw
             relevant_dom = self.retrieve_dom_context(dom, goal, top_k=30)
 
-            # ── 2. Build OBSERVATIONS block (only previous step) ──────────────
+            # ── 2. OBSERVATIONS ───────────────────────────────────────────────
             if last_obs:
                 obs_text = (
                     f"Previous Thought: {last_obs['thought']}\n"
@@ -417,11 +524,10 @@ class AgentWorker(QThread):
                 f"</CONTEXT_BLOCK>"
             )
 
-            # ── 3. Build message - single system + single user ────────────────
-            user_content = f"{context_block}\n\n{goal}"
+            # ── 3. Single system + user message ──────────────────────────────
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_content},
+                {"role": "user",   "content": f"{context_block}\n\n{goal}"},
             ]
 
             # ── 4. Call model ─────────────────────────────────────────────────
@@ -430,25 +536,17 @@ class AgentWorker(QThread):
             else:
                 response = self._react_local(screenshot_bytes, context_block, goal)
 
-            # ── 5. Emit thought + action to chat panel ────────────────────────
-            thought_line = ""
-            for line in response.split("\n"):
-                if line.startswith("Thought:"):
-                    thought_line = line
-                    break
+            # ── 5. Emit to chat panel ─────────────────────────────────────────
+            thought_line = next(
+                (l for l in response.split("\n") if l.startswith("Thought:")), "")
+            action_line = next(
+                (l for l in response.split("\n") if l.startswith("Action:")), "")
             self.step_log.emit(f"Step {step} | {thought_line or response[:120]}")
-
-            action_line = ""
-            for line in response.split("\n"):
-                if line.startswith("Action:"):
-                    action_line = line
-                    break
             if action_line:
                 self.step_log.emit(f"  {action_line}")
-
             self.log_signal.emit(f"Aegis[{step}]: {response[:200]}", "#AAAAAA")
 
-            # ── 6. Check terminal conditions ──────────────────────────────────
+            # ── 6. Terminal conditions ────────────────────────────────────────
             if "[GOAL ACHIEVED]" in response:
                 self.step_log.emit("[GOAL ACHIEVED]")
                 return response
@@ -458,56 +556,49 @@ class AgentWorker(QThread):
 
             # ── 7. Parse action ───────────────────────────────────────────────
             action = self.extract_action(response)
-
             if action is None:
                 self.step_log.emit("No action - loop complete")
                 return response
-
             if action.get("tool") == "__parse_error__":
-                self.step_log.emit("Parse error - retrying next step")
-                last_obs = {
-                    "thought":     thought_line or "Parse error",
-                    "action":      action,
-                    "tool_result": "parse_error",
-                }
+                self.step_log.emit("Parse error - retrying")
+                last_obs = {"thought": thought_line or "Parse error",
+                            "action": action, "tool_result": "parse_error"}
                 continue
 
             # ── 8. Stale detection ────────────────────────────────────────────
-            sig = json.dumps(action, sort_keys=True)
-            if sig == last_action_sig:
-                stale_count += 1
-            else:
-                stale_count = 0
-                last_action_sig = sig
-
+            sig         = json.dumps(action, sort_keys=True)
+            stale_count = (stale_count + 1) if sig == last_action_sig else 0
+            last_action_sig = sig
             if stale_count >= 3:
-                self.step_log.emit(f"Stale action x3 - aborting")
+                self.step_log.emit("Stale action x3 - aborting")
                 return f"[Stuck] Repeated action {stale_count} times: {sig}"
 
-            # ── 9. Execute tool via main thread ───────────────────────────────
-            tool = action.get("tool", "")
-            args = action.get("args", {})
-            arg_str = ", ".join(f'{k}={repr(v)[:40]}' for k, v in args.items())
+            # ── 9. Execute tool ───────────────────────────────────────────────
+            tool    = action.get("tool", "")
+            args    = action.get("args", {})
+            arg_str = ", ".join(f"{k}={repr(v)[:40]}" for k, v in args.items())
             self.step_log.emit(f"  {tool}({arg_str})")
 
             self._pending_tool_result = None
             self.tool_request.emit(tool, args)
             waited = 0
             while self._pending_tool_result is None and waited < 15000:
-                self.msleep(50); waited += 50
+                self.msleep(50)
+                waited += 50
 
             tool_result = str(self._pending_tool_result or "timeout")
             self.step_log.emit(f"  -> {tool_result[:80]}")
 
-            # ── 10. Store as single observation for next step ─────────────────
+            # ── 10. Store observation ─────────────────────────────────────────
             last_obs = {
                 "thought":     thought_line or "...",
                 "action":      action,
                 "tool_result": tool_result,
             }
 
-            # Wait after navigation/interaction tools
-            if tool in ("open_url", "click", "double_click", "right_click", "press_key", "go_back"):
+            # Navigation tools need more settle time
+            if tool in ("open_url", "click", "double_click",
+                        "right_click", "press_key", "go_back"):
                 self.msleep(1500)
             else:
                 self.msleep(600)
@@ -525,11 +616,13 @@ class AgentWorker(QThread):
             from qwen_vl_utils import process_vision_info
             screenshot = Image.open(BytesIO(screenshot_bytes))
             messages = [
-                {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-                {"role": "user",   "content": [
-                    {"type": "image", "image": screenshot},
-                    {"type": "text",  "text": f"{context_block}\n\n{goal}"},
-                ]},
+                {"role": "system",
+                 "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
+                {"role": "user",
+                 "content": [
+                     {"type": "image", "image": screenshot},
+                     {"type": "text",  "text": f"{context_block}\n\n{goal}"},
+                 ]},
             ]
             input_text = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True)
