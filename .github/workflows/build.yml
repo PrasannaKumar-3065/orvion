@@ -14,7 +14,7 @@
 #
 #  What is NOT included:
 #    • PyTorch / transformers / unsloth / huggingface_hub — not needed
-#    • Any local AI model — inference runs via gradio_client → HuggingFace Space
+#    • Any local AI model — inference runs via gradio_client==1.3.0 → HuggingFace Space
 #
 #  Secrets required:
 #    HF_TOKEN         HuggingFace API token — REQUIRED for Space inference
@@ -97,7 +97,7 @@ jobs:
             "psutil>=5.9.0" `
             "huggingface_hub" `
             "requests>=2.31.0" `
-            "gradio_client" `
+            "gradio_client==1.3.0" `
             "packaging>=23.0" `
             "python-dotenv>=1.0.0"
 
@@ -285,7 +285,7 @@ jobs:
             "certifi" \
             "psutil>=5.9.0" \
             "requests>=2.31.0" \
-            "gradio_client" \
+            "gradio_client==1.3.0" \
             "huggingface_hub" \
             "packaging>=23.0" \
             "python-dotenv>=1.0.0"
@@ -384,7 +384,7 @@ jobs:
             "Pillow>=10.0.0" \
             "psutil>=5.9.0" \
             "requests>=2.31.0" \
-            "gradio_client" \
+            "gradio_client==1.3.0" \
             "huggingface_hub" \
             "packaging>=23.0" \
             "python-dotenv>=1.0.0"
