@@ -420,17 +420,38 @@ jobs:
           file_name: .env
           fail_on_empty: false
         env:
-          # The action now automatically picks up everything defined here
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
-      # ── 6. Ad-hoc sign (lets the app open without Gatekeeper prompt) ───────
+      # ── 6. PyInstaller build ──────────────────────────────────────────────
+      - name: Build with PyInstaller
+        run: pyinstaller orvion.spec --clean --noconfirm
+        env:
+          ORVION_VERSION: ${{ env.APP_VERSION }}
+
+      # ── 7. Normalise app bundle path ──────────────────────────────────────
+      # PyInstaller COLLECT+BUNDLE outputs dist/Orvion/Orvion.app.
+      # build_dmg.sh expects dist/Orvion.app — move it if needed.
+      - name: Normalise app bundle path
+        run: |
+          if [ -d "dist/Orvion/Orvion.app" ]; then
+            echo "Moving dist/Orvion/Orvion.app → dist/Orvion.app"
+            mv dist/Orvion/Orvion.app dist/Orvion.app
+          fi
+          if [ ! -d "dist/Orvion.app" ]; then
+            echo "ERROR: dist/Orvion.app not found. Contents of dist/:"
+            ls -la dist/
+            exit 1
+          fi
+          echo "App bundle ready at: dist/Orvion.app"
+
+      # ── 8. Ad-hoc sign (lets the app open without Gatekeeper prompt) ─────
       - name: Ad-hoc code sign
         run: |
           codesign --force --deep --sign - \
             --entitlements installer/macos/entitlements.plist \
             dist/Orvion.app || true
 
-      # ── 7. Developer ID sign (only when APPLE_IDENTITY secret is set) ──────
+      # ── 9. Developer ID sign (only when APPLE_IDENTITY secret is set) ────
       - name: Developer ID code sign (optional)
         if: env.HAS_APPLE_CERT == 'true'
         run: |
@@ -442,23 +463,14 @@ jobs:
             --sign "${{ secrets.APPLE_IDENTITY }}" \
             dist/Orvion.app
 
-      # ── 8. Build DMG ──────────────────────────────────────────────────────
+      # ── 10. Build DMG ─────────────────────────────────────────────────────
       - name: Make DMG build script executable
         run: chmod +x installer/macos/build_dmg.sh
 
       - name: Build DMG
-        run: |
-          # Check if the app is nested inside the 'Orvion' folder and move it out
-          if [ -d "dist/Orvion/Orvion.app" ]; then
-            echo "Moving Orvion.app out of subfolder..."
-            mv dist/Orvion/Orvion.app dist/Orvion.app
-          fi
-          
-          # Now run the builder
-          bash installer/macos/build_dmg.sh
+        run: bash installer/macos/build_dmg.sh
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
-          # ... rest of your env vars ...
 
       # ── 9. Upload artifact ────────────────────────────────────────────────
       - name: Upload macOS DMG

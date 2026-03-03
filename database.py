@@ -1,9 +1,30 @@
+import os
+import sys
 import sqlite3
+import pathlib
 from datetime import datetime
 
 
+def _db_path():
+    app_data = os.environ.get("ORVION_APP_DATA", "")
+    if app_data:
+        p = pathlib.Path(app_data)
+        p.mkdir(parents=True, exist_ok=True)
+        return str(p / "orvion.db")
+    if sys.platform == "win32":
+        base = pathlib.Path(os.environ.get("APPDATA", str(pathlib.Path.home()))) / "Orvion"
+    elif sys.platform == "darwin":
+        base = pathlib.Path.home() / "Library" / "Application Support" / "Orvion"
+    else:
+        base = pathlib.Path.home() / ".local" / "share" / "orvion"
+    base.mkdir(parents=True, exist_ok=True)
+    return str(base / "orvion.db")
+
+
 class Database:
-    def __init__(self, path="orvion.db"):
+    def __init__(self, path=None):
+        if path is None:
+            path = _db_path()
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self._init()
 
