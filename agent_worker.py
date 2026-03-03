@@ -76,10 +76,8 @@ class _SpaceClient:
                 from gradio_client import Client
                 HF_TOKEN = os.getenv("HF_TOKEN")
                 try:
-                    # Try the modern keyword first
                     self._client = Client(self.space_url, hf_token=HF_TOKEN)
                 except TypeError:
-                    # Fallback for very old versions (pre-0.3.0)
                     self._client = Client(self.space_url, token=HF_TOKEN)
             except ImportError:
                 raise RuntimeError("gradio_client not installed. Run: pip install gradio_client")
@@ -277,7 +275,7 @@ class AgentWorker(QThread):
             self._run_local()
 
     def _run_api(self):
-        self.phase_changed.emit("checking", "Connecting to HuggingFace Space…")
+        self.phase_changed.emit("checking", "Connecting to HuggingFace Space\u2026")
         self.hw_info.emit(False, 0.0, 0.0, "HuggingFace Cloud")
         try:
             import urllib.request
@@ -285,12 +283,12 @@ class AgentWorker(QThread):
         except Exception as e:
             self.phase_changed.emit("error", f"Cannot reach Space: {e}")
             return
-        self.phase_changed.emit("ready", "Connected to HuggingFace Space ✓")
+        self.phase_changed.emit("ready", "Connected to HuggingFace Space \u2713")
         self.model_ready.emit()
         self._main_loop()
 
     def _run_local(self):
-        self.phase_changed.emit("checking", "Checking hardware…")
+        self.phase_changed.emit("checking", "Checking hardware\u2026")
         try:
             import torch
             if torch.cuda.is_available():
@@ -306,7 +304,7 @@ class AgentWorker(QThread):
             from constants import REPO_ID
             from unsloth import FastVisionModel
             from transformers import Qwen2VLProcessor
-            self.phase_changed.emit("loading", "Loading model into memory…")
+            self.phase_changed.emit("loading", "Loading model into memory\u2026")
             self.model, _ = FastVisionModel.from_pretrained(REPO_ID, load_in_4bit=True)
             FastVisionModel.for_inference(self.model)
             self.processor = Qwen2VLProcessor.from_pretrained(REPO_ID)
@@ -379,12 +377,11 @@ class AgentWorker(QThread):
           System: Aegis system prompt
           User:   [screenshot] + <CONTEXT_BLOCK>[DOM][OBSERVATIONS: prev step only]</CONTEXT_BLOCK> + goal
 
-        The goal is ALWAYS the original user query — never changes.
+        The goal is ALWAYS the original user query - never changes.
         OBSERVATIONS contains only the immediately previous thought/action/result.
         Loop ends on [GOAL ACHIEVED], [FLOW BLOCKED], action=None, or max_steps.
         """
-        # last_obs holds the single previous step for the OBSERVATIONS block
-        last_obs: dict = {}   # keys: thought, action, tool_result
+        last_obs: dict = {}
         stale_count = 0
         last_action_sig = None
 
@@ -396,7 +393,7 @@ class AgentWorker(QThread):
             while self.browser_state is None and waited < 15000:
                 self.msleep(50); waited += 50
             if not self.browser_state:
-                self.step_log.emit("⚠ Browser state timeout — skipping step")
+                self.step_log.emit("Warning: Browser state timeout - skipping step")
                 continue
 
             screenshot_bytes, dom_raw = self.browser_state
@@ -420,7 +417,7 @@ class AgentWorker(QThread):
                 f"</CONTEXT_BLOCK>"
             )
 
-            # ── 3. Build message — single system + single user ────────────────
+            # ── 3. Build message - single system + single user ────────────────
             user_content = f"{context_block}\n\n{goal}"
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -439,7 +436,7 @@ class AgentWorker(QThread):
                 if line.startswith("Thought:"):
                     thought_line = line
                     break
-            self.step_log.emit(f"💭 {thought_line or response[:120]}")
+            self.step_log.emit(f"Step {step} | {thought_line or response[:120]}")
 
             action_line = ""
             for line in response.split("\n"):
@@ -447,28 +444,27 @@ class AgentWorker(QThread):
                     action_line = line
                     break
             if action_line:
-                self.step_log.emit(f"⚡ {action_line}")
+                self.step_log.emit(f"  {action_line}")
 
             self.log_signal.emit(f"Aegis[{step}]: {response[:200]}", "#AAAAAA")
 
             # ── 6. Check terminal conditions ──────────────────────────────────
             if "[GOAL ACHIEVED]" in response:
-                self.step_log.emit("✅ [GOAL ACHIEVED]")
+                self.step_log.emit("[GOAL ACHIEVED]")
                 return response
             if "[FLOW BLOCKED]" in response:
-                self.step_log.emit("🚫 [FLOW BLOCKED]")
+                self.step_log.emit("[FLOW BLOCKED]")
                 return response
 
             # ── 7. Parse action ───────────────────────────────────────────────
             action = self.extract_action(response)
 
             if action is None:
-                # Model decided no action needed — done
-                self.step_log.emit("⏹ No action — loop complete")
+                self.step_log.emit("No action - loop complete")
                 return response
 
             if action.get("tool") == "__parse_error__":
-                self.step_log.emit("⚠ Parse error — retrying next step")
+                self.step_log.emit("Parse error - retrying next step")
                 last_obs = {
                     "thought":     thought_line or "Parse error",
                     "action":      action,
@@ -485,13 +481,14 @@ class AgentWorker(QThread):
                 last_action_sig = sig
 
             if stale_count >= 3:
-                self.step_log.emit("⚠ Stale action x3 — aborting")
+                self.step_log.emit(f"Stale action x3 - aborting")
                 return f"[Stuck] Repeated action {stale_count} times: {sig}"
 
             # ── 9. Execute tool via main thread ───────────────────────────────
             tool = action.get("tool", "")
             args = action.get("args", {})
-            self.step_log.emit(f"🔧 {tool}({', '.join(f'{k}={repr(v)[:40]}' for k,v in args.items())})")
+            arg_str = ", ".join(f'{k}={repr(v)[:40]}' for k, v in args.items())
+            self.step_log.emit(f"  {tool}({arg_str})")
 
             self._pending_tool_result = None
             self.tool_request.emit(tool, args)
@@ -500,7 +497,7 @@ class AgentWorker(QThread):
                 self.msleep(50); waited += 50
 
             tool_result = str(self._pending_tool_result or "timeout")
-            self.step_log.emit(f"   → {tool_result[:80]}")
+            self.step_log.emit(f"  -> {tool_result[:80]}")
 
             # ── 10. Store as single observation for next step ─────────────────
             last_obs = {
