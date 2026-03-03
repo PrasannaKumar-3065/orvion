@@ -124,9 +124,11 @@ jobs:
       - name: Create .env file
         uses: SpicyPizza/create-envfile@v2.0
         with:
-          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
           file_name: .env
-          fail_on_empty: false # Keeps the build going even if you forget the secret
+          fail_on_empty: false
+        env:
+          # The action now automatically picks up everything defined here
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       # ── 6. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
@@ -304,9 +306,11 @@ jobs:
       - name: Create .env file
         uses: SpicyPizza/create-envfile@v2.0
         with:
-          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
           file_name: .env
-          fail_on_empty: false # Keeps the build going even if you forget the secret
+          fail_on_empty: false
+        env:
+          # The action now automatically picks up everything defined here
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       # ── 7. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
@@ -406,9 +410,11 @@ jobs:
       - name: Create .env file
         uses: SpicyPizza/create-envfile@v2.0
         with:
-          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
           file_name: .env
-          fail_on_empty: false # Keeps the build going even if you forget the secret
+          fail_on_empty: false
+        env:
+          # The action now automatically picks up everything defined here
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
       # ── 6. Ad-hoc sign (lets the app open without Gatekeeper prompt) ───────
       - name: Ad-hoc code sign
@@ -434,13 +440,18 @@ jobs:
         run: chmod +x installer/macos/build_dmg.sh
 
       - name: Build DMG
-        run: bash installer/macos/build_dmg.sh
+        run: |
+          # Check if the app is nested inside the 'Orvion' folder and move it out
+          if [ -d "dist/Orvion/Orvion.app" ]; then
+            echo "Moving Orvion.app out of subfolder..."
+            mv dist/Orvion/Orvion.app dist/Orvion.app
+          fi
+          
+          # Now run the builder
+          bash installer/macos/build_dmg.sh
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
-          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
-          APPLE_TEAM_ID:  ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID:       ${{ secrets.APPLE_ID }}
-          APPLE_APP_PWD:  ${{ secrets.APPLE_APP_PWD }}
+          # ... rest of your env vars ...
 
       # ── 9. Upload artifact ────────────────────────────────────────────────
       - name: Upload macOS DMG
