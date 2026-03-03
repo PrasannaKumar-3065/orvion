@@ -8,10 +8,10 @@
 #  All AI inference is done remotely via gradio_client → HuggingFace Space.
 #  No local model, no GPU required on the end-user machine.
 # ─────────────────────────────────────────────────────────────────────────────
-
+import certifi
 import sys
 from PyInstaller.utils.hooks import collect_all
-
+cert_path = certifi.where()
 # ── Collect data/binaries for packages that need it ──────────────────────────
 pil_datas,     pil_bins,     pil_hidden     = collect_all("PIL")
 req_datas,     req_bins,     req_hidden     = collect_all("requests")
@@ -91,7 +91,7 @@ a = Analysis(
     ["launcher.py"],
     pathex=["."],
     binaries=ALL_BINS,
-    datas=ALL_DATAS + [('.env', '.')],
+    datas=ALL_DATAS + [('.env', '.'), (cert_path, 'certifi')],
     hiddenimports=ALL_HIDDEN,
     hookspath=[],           # no custom hooks needed — ML packages are excluded
     hooksconfig={},

@@ -17,18 +17,14 @@ def load_bundled_env():
     else:
         base_path = pathlib.Path(__file__).parent
     if sys.platform == "linux":
-        cert_paths = [
-            "/etc/ssl/certs/ca-certificates.crt",                # Debian/Ubuntu/Gentoo
-            "/etc/pki/tls/certs/ca-bundle.crt",                  # Fedora/RHEL
-            "/etc/ssl/ca-bundle.pem",                            # OpenSUSE
-            "/etc/pki/tls/cacert.pem",                           # OpenELEC
-            "/etc/ssl/cert.pem",                                 # Alpine
-        ]
-        for path in cert_paths:
-            if os.path.exists(path):
-                os.environ["REQUESTS_CA_BUNDLE"] = path
-                os.environ["SSL_CERT_FILE"] = path
-                break
+        bundled_cert = base_path / "certifi" / "cacert.pem"
+        if bundled_cert.exists():
+            cert_str = str(bundled_cert)
+            os.environ["SSL_CERT_FILE"] = cert_str
+            os.environ["REQUESTS_CA_BUNDLE"] = cert_str
+            # This part fixes urllib/gradio specifically
+            import ssl
+            ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=cert_str)
     env_path = base_path / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)

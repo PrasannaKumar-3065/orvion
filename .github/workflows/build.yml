@@ -92,6 +92,7 @@ jobs:
           pip install `
             "PyQt5>=5.15.10" `
             "PyQtWebEngine>=5.15.7" `
+            "certifi" `
             "Pillow>=10.0.0" `
             "psutil>=5.9.0" `
             "requests>=2.31.0" `
@@ -280,6 +281,7 @@ jobs:
             "PyQt5>=5.15.10" \
             "PyQtWebEngine>=5.15.7" \
             "Pillow>=10.0.0" \
+            "certifi" \
             "psutil>=5.9.0" \
             "requests>=2.31.0" \
             "gradio_client>=0.7.0" \
@@ -374,6 +376,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           pip install \
+            "certifi" \
             "PyQt5>=5.15.10" \
             "PyQtWebEngine>=5.15.7" \
             "Pillow>=10.0.0" \
