@@ -121,14 +121,12 @@ jobs:
                   icon_path.write_bytes(b"")
 
       # ── 5. Write .env safely using env variables ───────────────────────────
-      - name: Inject HF_TOKEN into .env
-        shell: cmd
-        env:
-          TEMP_HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          @echo off
-          echo HF_TOKEN=%TEMP_HF_TOKEN%>.env
-          echo Wrote .env file to disk.
+      - name: Create .env file
+        uses: SpicyPizza/create-envfile@v2.0
+        with:
+          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          file_name: .env
+          fail_on_empty: false # Keeps the build going even if you forget the secret
 
       # ── 6. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
@@ -303,14 +301,12 @@ jobs:
           fi
 
       # ── 6. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
-      - name: Inject HF_TOKEN into .env
-        run: |
-          TOKEN="${{ secrets.HF_TOKEN }}"
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::HF_TOKEN secret is not set — Space calls may fail at runtime"
-          fi
-          echo "HF_TOKEN=${TOKEN}" > .env
-          echo "Wrote .env (token length: ${#TOKEN})"
+      - name: Create .env file
+        uses: SpicyPizza/create-envfile@v2.0
+        with:
+          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          file_name: .env
+          fail_on_empty: false # Keeps the build going even if you forget the secret
 
       # ── 7. PyInstaller build ──────────────────────────────────────────────
       - name: Build with PyInstaller
@@ -407,19 +403,12 @@ jobs:
           fi
 
       # ── 5. Write .env so the frozen app can read HF_TOKEN via load_dotenv() ─
-      - name: Inject HF_TOKEN into .env
-        run: |
-          TOKEN="${{ secrets.HF_TOKEN }}"
-          if [ -z "$TOKEN" ]; then
-            echo "::warning::HF_TOKEN secret is not set — Space calls may fail at runtime"
-          fi
-          echo "HF_TOKEN=${TOKEN}" > .env
-          echo "Wrote .env (token length: ${#TOKEN})"
-
-      - name: Build with PyInstaller
-        run: pyinstaller orvion.spec --clean --noconfirm
-        env:
-          ORVION_VERSION: ${{ env.APP_VERSION }}
+      - name: Create .env file
+        uses: SpicyPizza/create-envfile@v2.0
+        with:
+          envkey_HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          file_name: .env
+          fail_on_empty: false # Keeps the build going even if you forget the secret
 
       # ── 6. Ad-hoc sign (lets the app open without Gatekeeper prompt) ───────
       - name: Ad-hoc code sign
