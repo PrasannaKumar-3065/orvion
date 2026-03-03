@@ -10,6 +10,28 @@ multiprocessing.freeze_support()
 
 import os, sys, pathlib
 
+import os, sys, pathlib
+from dotenv import load_dotenv  # Add this import
+
+# --- New: Load bundled .env file ---
+def load_bundled_env():
+    if getattr(sys, 'frozen', False):
+        # Path where PyInstaller extracts data at runtime
+        bundle_dir = pathlib.Path(sys._MEIPASS)
+    else:
+        # Standard script path
+        bundle_dir = pathlib.Path(__file__).parent
+
+    env_path = bundle_dir / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+    else:
+        # Optional: Print for debugging in console mode
+        print(f"DEBUG: .env not found at {env_path}")
+
+load_bundled_env()
+# -----------------------------------
+
 # Single-instance guard — prevents the zip-bomb effect
 if sys.platform == "win32":
     import ctypes
