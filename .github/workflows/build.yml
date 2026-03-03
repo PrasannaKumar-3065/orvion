@@ -317,6 +317,7 @@ jobs:
         run: pyinstaller orvion.spec --clean --noconfirm
         env:
           ORVION_VERSION: ${{ env.APP_VERSION }}
+          REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
 
       # ── 8. Build AppImage ─────────────────────────────────────────────────
       - name: Make scripts executable
