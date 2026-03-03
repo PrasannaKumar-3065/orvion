@@ -16,10 +16,11 @@ cert_path = certifi.where()
 pil_datas,     pil_bins,     pil_hidden     = collect_all("PIL")
 req_datas,     req_bins,     req_hidden     = collect_all("requests")
 gradio_datas,  gradio_bins,  gradio_hidden  = collect_all("gradio_client")
+hf_datas, hf_bins, hf_hidden = collect_all("huggingface_hub")
 
-ALL_DATAS  = pil_datas  + req_datas  + gradio_datas
-ALL_BINS   = pil_bins   + req_bins   + gradio_bins
-ALL_HIDDEN = pil_hidden + req_hidden + gradio_hidden + [
+ALL_DATAS  = pil_datas  + req_datas  + gradio_datas + hf_datas
+ALL_BINS   = pil_bins   + req_bins   + gradio_bins  + hf_bins
+ALL_HIDDEN = pil_hidden + req_hidden + gradio_hidden + hf_hidden + [
     # ── PyQt5 ──────────────────────────────────────────────────────────────
     "PyQt5",
     "PyQt5.QtCore",
@@ -74,7 +75,7 @@ EXCLUDES = [
     "transformers", "tokenizers",
     "unsloth",
     "accelerate", "safetensors", "bitsandbytes",
-    "huggingface_hub",
+    # "huggingface_hub",
     "qwen_vl_utils",
     "numpy", "scipy", "sklearn", "pandas",
     # Other unused heavy deps
