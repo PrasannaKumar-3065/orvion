@@ -506,7 +506,7 @@ class AgentWorker(QThread):
             screenshot_bytes, dom_raw = self.browser_state
             dom          = json.loads(dom_raw) if isinstance(dom_raw, str) else dom_raw
             relevant_dom = self.retrieve_dom_context(dom, goal, top_k=30)
-
+            print(relevant_dom)
             # ── 2. OBSERVATIONS ───────────────────────────────────────────────
             if last_obs:
                 obs_text = (

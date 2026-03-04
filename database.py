@@ -32,16 +32,50 @@ class Database:
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT, created_at TEXT
+                title TEXT,
+                created_at TEXT
             );
+
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER, role TEXT,
-                content TEXT, timestamp TEXT
+                conversation_id INTEGER,
+                role TEXT,
+                content TEXT,
+                timestamp TEXT
             );
+
             CREATE TABLE IF NOT EXISTS documents (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT, content TEXT, updated_at TEXT
+                title TEXT,
+                content TEXT,
+                updated_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_address TEXT,
+                password TEXT,
+                created_on DATETIME,
+                expiry_date DATETIME
+            );
+
+            CREATE TABLE IF NOT EXISTS inbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_address TEXT,
+                send_to TEXT,
+                subject TEXT,
+                body TEXT,
+                received_at DATETIME
+            );
+
+            CREATE TABLE IF NOT EXISTS sent (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_address TEXT,
+                send_to TEXT,
+                diff TEXT CHECK(diff IN ("REPLY", "FORWARD", "SENT")),
+                subject TEXT,
+                body TEXT,
+                received_at DATETIME
             );
         """)
         self.conn.commit()
@@ -96,3 +130,32 @@ class Database:
         c = self.conn.cursor()
         c.execute("SELECT id,title,content FROM documents WHERE id=?", (doc_id,))
         return c.fetchone()
+    
+    def email_auth(self, email, password):
+        c = self.conn.cursor()
+        c.execute("SELECT COUNT(*) FROM emails WHERE email_address=? and password=?",(email, password))
+        return c.fetchone()
+    
+    def get_inbox(self, email):
+        c = self.conn.cursor()
+        c.execute("SELECT * FROM inbox where email_address=?", (email))
+        return c.fetchall()
+    
+    def get_sent(self, email):
+        c = self.conn.cursor()
+        c.execute("SELECT * FROM sent where email_address=?", (email))
+        return c.fetchall()
+    
+    def send_insert(self, **kwargs):
+        mfrom = kwargs.get('from')
+        email = kwargs.get('email')
+        body = kwargs.get('body')
+        subject = kwargs.get('subject')
+        table = kwargs.get('table')
+        diff = kwargs.get('diff')
+        c = self.conn.cursor()
+        if table == 'inbox':
+            c.execute("INSERT INTO ? (email_address,send_to,subject,body,received_at) values(?,?,?,?)", (table, email,mfrom,subject,body,datetime.now()))
+        else:
+            c.execute("INSERT INTO ? (email_address,send_to,subject,body,received_at, diff) values(?,?,?,?,?)", (table, email,mfrom,subject,body,datetime.now(),diff))
+        return c.execute().fetchone()

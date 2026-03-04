@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QEvent
 
 from database import Database
+from email_hub import EmailHub
 from styles import QSS_BASE
 from constants import AI_AVAILABLE
 from agent_worker import AgentWorker
@@ -58,8 +59,10 @@ class OrvionWindow(QMainWindow):
         self.tabs     = QTabWidget()
         self.web_page = WebEngine()
         self.editor   = EditorPanel(self.db)
+        self.mail_hub = EmailHub(self.db)
         self.tabs.addTab(self.editor,   "Editor")
         self.tabs.addTab(self.web_page, "Browser")
+        self.tabs.addTab(self.mail_hub, 'Emails')
 
         self.splitter.addWidget(self.chat)
         self.splitter.addWidget(self.tabs)
