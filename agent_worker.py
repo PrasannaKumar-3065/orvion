@@ -1,33 +1,58 @@
 """
-agent_worker.py
-───────────────
+agent_worker.py  (v2 — record / rerun / self-heal)
+───────────────────────────────────────────────────
 Two modes, same Qt signals.
 
-  API mode   → HuggingFace Space via direct HTTP (no gradio_client schema fetch).
-  Local mode → torch + unsloth, lazy imported.
+  API mode   → screenshot + scored DOM → HuggingFace Space via direct HTTP.
+  Local mode → screenshot + scored DOM → local Qwen2.5-VL (torch + unsloth).
 
-WHY DIRECT HTTP:
-  gradio_client calls /info (or /api/info) before any prediction to fetch the
-  Space schema. If the bundled gradio_client version mismatches the live Space's
-  Gradio version, this returns {"detail":"Not Found"} and crashes — even for a
-  public Space with a valid HF_TOKEN.
+Execution modes
+───────────────
+  RECORD  (first run)
+    Each user message runs the full DOM pipeline + LLM.
+    Parsed action is saved to test_steps with cx/cy coordinates.
+    Only the final Answer is emitted to chat; Thought/Action are silent.
 
-  Fix: use the Gradio queue REST API directly (POST /queue/join + SSE /queue/data).
-  No schema fetch needed. gradio_client is kept only as a fallback.
+  RERUN
+    Steps are loaded from DB and replayed by coordinate.
+    If an action fails (element not at expected position or DOM changed),
+    self-healing kicks in: DOM pipeline + LLM finds the element again,
+    updates the step in DB, and continues.
+
+Self-healing flow
+─────────────────
+  1. Action fails (execute_step returns error string).
+  2. Emit  step_log("Orvion is attempting self healing…").
+  3. Capture fresh screenshot + DOM → score_and_select(original task hint).
+  4. Call LLM → parse new action.
+  5. Update test_steps row with new cx/cy/elem_* and status='healed'.
+  6. Execute the new action.
 """
 
-import re
 import json
-import math
 import os
-import threading
 import pathlib
-from io import BytesIO
+import re
+import tempfile
+import threading
+import time
+import traceback
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
-
 from dotenv import load_dotenv
+
 load_dotenv()
+
+from inference_helpers import (
+    SYSTEM_PROMPT,
+    score_and_select,
+    format_dom_for_model,
+    build_prompt,
+    build_space_prompt,
+    parse_output,
+    warmup_scorer,
+)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -42,66 +67,28 @@ def _load_config() -> dict:
     return {"mode": "api", "space_url": "https://sanax3065-orivion-api.hf.space"}
 
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
-
-def _build_prompt(messages: list) -> str:
-    """Flatten message list into the training prompt format."""
-    parts = []
-    for m in messages:
-        role    = m.get("role", "user")
-        content = m.get("content", "")
-        if isinstance(content, list):
-            content = "\n".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        if role == "system":
-            parts.append(f"System: {content}")
-        elif role == "user":
-            parts.append(f"User: {content}")
-        elif role == "assistant":
-            parts.append(f"Assistant: {content}")
-    parts.append("Assistant:")
-    return "\n\n".join(parts)
-
-
 # ── Space client ──────────────────────────────────────────────────────────────
-#
-# Primary path: raw Gradio queue HTTP — no gradio_client import, no /info call.
-#   1. POST {url}/queue/join   body={"data":[...], "fn_index":0, "session_hash":"..."}
-#   2. GET  {url}/queue/data?session_hash=...   (SSE stream)
-#   3. When msg=="process_completed" → return output.data[0]
-#
-# Works on Gradio 3.x and 4.x regardless of installed gradio_client version.
-# Falls back to gradio_client if the direct path raises any exception.
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _SpaceClient:
     def __init__(self, space_url: str):
         self.space_url = space_url.rstrip("/")
 
-    # ── Direct HTTP ───────────────────────────────────────────────────────────
-
-    def _call_direct(self, prompt_text: str, image_bytes=None) -> str:
+    def _call_direct(self, prompt_text: str, image_bytes: bytes = None) -> str:
         import urllib.request
         import urllib.parse
         import uuid
-        import time
 
         session_hash = uuid.uuid4().hex
         hf_token     = os.getenv("HF_TOKEN", "")
         auth_hdr     = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
 
-        # Optional: upload screenshot → get file ref dict back
         image_ref = None
         if image_bytes is not None:
             try:
                 image_ref = self._upload_file(image_bytes, hf_token)
             except Exception:
-                image_ref = None   # text-only fallback is fine
+                image_ref = None
 
-        # POST /queue/join
         body = json.dumps({
             "data":         [prompt_text, image_ref],
             "fn_index":     0,
@@ -121,7 +108,6 @@ class _SpaceClient:
         if "error" in jr:
             raise RuntimeError(f"queue/join error: {jr['error']}")
 
-        # GET /queue/data  (SSE stream)
         qs = f"session_hash={urllib.parse.quote(session_hash)}"
         if hf_token:
             qs += f"&__hf_token={urllib.parse.quote(hf_token)}"
@@ -130,8 +116,7 @@ class _SpaceClient:
             headers={"Accept": "text/event-stream",
                      "Cache-Control": "no-cache", **auth_hdr},
         )
-        buf      = ""
-        deadline = time.time() + 180
+        buf, deadline = "", time.time() + 180
         with urllib.request.urlopen(sse_req, timeout=180) as sse:
             while time.time() < deadline:
                 chunk = sse.read(4096)
@@ -156,7 +141,6 @@ class _SpaceClient:
         raise RuntimeError("SSE stream ended without a result")
 
     def _upload_file(self, image_bytes: bytes, hf_token: str) -> dict:
-        """Upload a PNG screenshot to the Space, return the file reference dict."""
         import urllib.request
         import uuid
         boundary = uuid.uuid4().hex
@@ -169,16 +153,12 @@ class _SpaceClient:
         if hf_token:
             hdrs["Authorization"] = f"Bearer {hf_token}"
         req = urllib.request.Request(
-            f"{self.space_url}/upload",
-            data=body, headers=hdrs, method="POST")
+            f"{self.space_url}/upload", data=body, headers=hdrs, method="POST")
         with urllib.request.urlopen(req, timeout=30) as r:
             result = json.loads(r.read())
         return result[0] if isinstance(result, list) and result else result
 
-    # ── gradio_client fallback ────────────────────────────────────────────────
-
-    def _call_gradio_client(self, prompt_text: str, image_bytes=None) -> str:
-        """Secondary path — may fail on gradio_client version mismatch."""
+    def _call_gradio_client(self, prompt_text: str, image_bytes: bytes = None) -> str:
         from gradio_client import Client
         hf_token = os.getenv("HF_TOKEN")
         try:
@@ -187,64 +167,39 @@ class _SpaceClient:
             client = Client(self.space_url, token=hf_token)
         image_arg = None
         if image_bytes is not None:
-            import tempfile
             from gradio_client import handle_file
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             tmp.write(image_bytes)
             tmp.close()
             image_arg = handle_file(tmp.name)
-        result = client.predict(
-            prompt_text=prompt_text,
-            image_file=image_arg,
-            api_name="/generate",
-        )
-        return str(result).strip()
+        return str(client.predict(
+            prompt_text=prompt_text, image_file=image_arg, api_name="/generate",
+        )).strip()
 
-    # ── Public interface ──────────────────────────────────────────────────────
-
-    def generate(self, prompt_text: str, image=None) -> str:
-        """Direct HTTP first; gradio_client fallback on failure."""
+    def generate(self, prompt_text: str, image_bytes: bytes = None) -> str:
         try:
-            return self._call_direct(prompt_text, image_bytes=image)
-        except Exception as direct_err:
+            return self._call_direct(prompt_text, image_bytes=image_bytes)
+        except Exception as de:
             try:
-                return self._call_gradio_client(prompt_text, image_bytes=image)
-            except Exception as gc_err:
+                return self._call_gradio_client(prompt_text, image_bytes=image_bytes)
+            except Exception as ge:
                 raise RuntimeError(
-                    f"Both call methods failed.\n"
-                    f"  Direct HTTP:   {direct_err}\n"
-                    f"  gradio_client: {gc_err}"
-                )
-
-    def chat(self, messages: list, image_bytes: bytes = None) -> str:
-        return self.generate(_build_prompt(messages), image=image_bytes)
+                    f"Both paths failed.\n  Direct: {de}\n  gradio_client: {ge}")
 
 
-# ── Tool list ─────────────────────────────────────────────────────────────────
-
-TOOL_LIST = (
-    "click, type, clear_and_type, open_url, press_key, select_option, hover, "
-    "double_click, right_click, go_back, scroll_down, scroll_up, scroll_to_element, "
-    "scroll_to_top, scroll_to_bottom, verify_text_present, verify_text_absent, "
-    "verify_element_visible, verify_element_enabled, verify_url_contains, "
-    "verify_page_title, verify_input_value, verify_element_count, get_text, "
-    "wait_for_element, wait_for_text, wait_for_url_change, wait_for_network_idle, "
-    "wait, get_current_url, get_page_title, raise_bug_ticket, mark_step_pass, "
-    "mark_step_fail, mark_flow_blocked, add_test_comment, capture_evidence"
-)
-
-SYSTEM_PROMPT = (
-    f"You are Aegis. Current Mode: QUALITY_TESTER\n"
-    f"Tools: [{TOOL_LIST}]"
-)
+# ── Agentic trigger detection ─────────────────────────────────────────────────
 
 AGENTIC_TRIGGERS = (
     "open ", "go to ", "navigate", "search for", "click",
     "type ", "browse", "find on", "look up", "url ",
     "website", "google", "automate", "execute", "fill in",
     "log in", "login", "verify", "check", "scroll",
-    "double click", "right click", "hover",
+    "double click", "right click", "hover", "fill", "select",
 )
+
+def _is_agentic(text: str) -> bool:
+    lower = text.lower()
+    return any(t in lower for t in AGENTIC_TRIGGERS)
 
 
 # ── AgentWorker ───────────────────────────────────────────────────────────────
@@ -260,25 +215,29 @@ class AgentWorker(QThread):
     hw_info               = pyqtSignal(bool, float, float, str)
     request_browser_state = pyqtSignal()
     browser_state_ready   = pyqtSignal(bytes, str)
-    step_log              = pyqtSignal(str)
+    step_log              = pyqtSignal(str)       # internal; NOT shown in chat
     tool_request          = pyqtSignal(str, dict)
     tool_result_ready     = pyqtSignal(object)
     setup_requested       = pyqtSignal()
     setup_result_ready    = pyqtSignal(str, str)
     request_screenshot    = pyqtSignal()
     screenshot_ready      = pyqtSignal(bytes)
+    # New signals
+    rerun_status          = pyqtSignal(str)       # "Running step 2/5…" etc.
+    self_healing          = pyqtSignal(str)       # "Orvion is attempting self healing…"
 
-    def __init__(self):
+    def __init__(self, db=None):
         super().__init__()
         self.running              = True
         self.mutex                = QMutex()
         self.condition            = QWaitCondition()
         self.browser_state        = None
         self._pending_tool_result = None
-        self.chat_queue           = []
+        self.chat_queue: list     = []
         self.lock                 = threading.Lock()
         self.model                = None
         self.processor            = None
+        self.db                   = db   # Database instance (injected by main_window)
 
         cfg       = _load_config()
         self.mode = cfg.get("mode", "api")
@@ -287,96 +246,36 @@ class AgentWorker(QThread):
                                            "https://sanax3065-orivion-api.hf.space"))
         self._space = _SpaceClient(space_url) if self.mode == "api" else None
 
+        # Rerun queue: list of conv_ids to re-execute
+        self._rerun_queue: list = []
+
     # ── Qt signal handlers ────────────────────────────────────────────────────
 
-    def enqueue_chat(self, user_text: str, history: list):
+    def enqueue_chat(self, user_text: str, history: list, conv_id: int = None):
         with self.lock:
-            self.chat_queue.append((user_text, history))
+            self.chat_queue.append((user_text, history, conv_id))
 
-    def _on_screenshot_ready(self, data):  pass
-    def _on_setup_result(self, mode, url): pass
-    def _on_tool_result(self, result):     self._pending_tool_result = result
-    def _on_browser_state_ready(self, screenshot, dom):
-        self.browser_state = (screenshot, dom)
+    def enqueue_rerun(self, conv_id: int):
+        with self.lock:
+            self._rerun_queue.append(conv_id)
 
-    # ── BM25 DOM retrieval ────────────────────────────────────────────────────
+    def _on_tool_result(self, result):
+        self._pending_tool_result = result
 
-    def _tokenize(self, text: str) -> list:
-        return re.findall(r'[a-z0-9]+', text.lower())
-
-    def _bm25_score(self, query_tokens, doc_tokens, k1=1.5, b=0.75, avg_dl=8.0):
-        if not doc_tokens:
-            return 0.0
-        dl   = len(doc_tokens)
-        freq = {t: doc_tokens.count(t) for t in set(query_tokens) & set(doc_tokens)}
-        score = 0.0
-        for qt in query_tokens:
-            f = freq.get(qt, 0)
-            if f == 0:
-                continue
-            tf    = (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avg_dl))
-            score += math.log(2.0) * tf
-        return score
-
-    def retrieve_dom_context(self, dom, goal, top_k=30, viewport_bonus=2.0):
-        if not dom:
-            return []
-        q_tok  = self._tokenize(goal)
-        scored = []
-        for el in dom:
-            doc   = " ".join(filter(None, [el.get("text", ""), el.get("tag", ""),
-                                           el.get("type", ""), el.get("selector", "")]))
-            score = self._bm25_score(q_tok, self._tokenize(doc))
-            if el.get("in_viewport"):
-                score *= viewport_bonus
-            scored.append((score, el))
-        scored.sort(key=lambda x: (-x[0], x[1].get("vp_top", 9999)))
-        top = [el for s, el in scored if s > 0][:top_k]
-        return [{"tag": el.get("tag"), "selector": el.get("selector"),
-                 "text": el.get("text"), "type": el.get("type"),
-                 "value": el.get("value")} for el in top]
-
-    # ── Action parser ─────────────────────────────────────────────────────────
-
-    VALID_TOOLS = {
-        "click", "type", "clear_and_type", "open_url", "press_key",
-        "select_option", "hover", "double_click", "right_click", "go_back",
-        "scroll_down", "scroll_up", "scroll_to_element", "scroll_to_top",
-        "scroll_to_bottom", "verify_text_present", "verify_text_absent",
-        "verify_element_visible", "verify_element_enabled", "verify_url_contains",
-        "verify_page_title", "verify_input_value", "verify_element_count",
-        "get_text", "wait_for_element", "wait_for_text", "wait_for_url_change",
-        "wait_for_network_idle", "wait", "get_current_url", "get_page_title",
-        "raise_bug_ticket", "mark_step_pass", "mark_step_fail", "mark_flow_blocked",
-        "add_test_comment", "capture_evidence", "screenshot_diff",
-    }
-
-    def extract_action(self, text: str):
-        m = re.search(r"^Action:\s*(.+)$", text, re.MULTILINE)
-        if not m:
-            return None
-        raw = m.group(1).strip()
-        if raw.lower() in ("none", "null", ""):
-            return None
-        raw = (raw.replace("\u2018", "'").replace("\u2019", "'")
-                  .replace("\u201c", '"').replace("\u201d", '"'))
-        raw = re.sub(r'[^\x00-\x7F]+', '', raw)
+    def _on_browser_state_ready(self, screenshot: bytes, dom_json: str):
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            try:
-                parsed = json.loads(raw.replace("'", '"'))
-            except Exception:
-                return {"tool": "__parse_error__", "args": {}}
-        if isinstance(parsed, list):
-            valid = [a for a in parsed
-                     if isinstance(a, dict) and a.get("tool") in self.VALID_TOOLS]
-            return valid[0] if valid else {"tool": "__parse_error__", "args": {}}
-        if isinstance(parsed, dict) and parsed.get("tool") in self.VALID_TOOLS:
-            return parsed
-        return {"tool": "__parse_error__", "args": {}}
+            raw_dom = json.loads(dom_json) if dom_json else []
+        except Exception:
+            raw_dom = []
+        self.browser_state = (screenshot, raw_dom)
 
-    # ── Thread run ────────────────────────────────────────────────────────────
+    def _on_screenshot_ready(self, data: bytes):
+        pass
+
+    def _on_setup_result(self, mode: str, url: str):
+        pass
+
+    # ── Thread entry points ───────────────────────────────────────────────────
 
     def run(self):
         if self.mode == "api":
@@ -393,6 +292,9 @@ class AgentWorker(QThread):
         except Exception as e:
             self.phase_changed.emit("error", f"Cannot reach Space: {e}")
             return
+        # Pre-load sentence-transformer so first query has no delay
+        self.phase_changed.emit("loading", "Loading sentence scorer\u2026")
+        warmup_scorer()
         self.phase_changed.emit("ready", "Connected to HuggingFace Space \u2713")
         self.model_ready.emit()
         self._main_loop()
@@ -406,235 +308,355 @@ class AgentWorker(QThread):
                 self.hw_info.emit(True, props.total_memory / (1024 ** 3),
                                   16.0, torch.cuda.get_device_name(0))
             else:
-                self.hw_info.emit(False, 0.0, 0.0, "CPU")
+                self.hw_info.emit(False, 0.0, 0.0, "CPU (no CUDA)")
         except ImportError:
             self.hw_info.emit(False, 0.0, 0.0, "torch not installed")
+            self.phase_changed.emit("error", "PyTorch not found — local mode requires torch.")
+            return
         try:
             from constants import REPO_ID
             from unsloth import FastVisionModel
-            from transformers import Qwen2VLProcessor
             self.phase_changed.emit("loading", "Loading model into memory\u2026")
-            self.model, _ = FastVisionModel.from_pretrained(REPO_ID, load_in_4bit=True)
+            self.model, self.processor = FastVisionModel.from_pretrained(
+                REPO_ID, load_in_4bit=True, use_gradient_checkpointing=False)
+            if hasattr(self.processor, "image_processor"):
+                self.processor.image_processor.max_pixels = 512 * 512
             FastVisionModel.for_inference(self.model)
-            self.processor = Qwen2VLProcessor.from_pretrained(REPO_ID)
+            self.model.eval()
             self.model_ready.emit()
-            self.phase_changed.emit("ready", "Aegis Vision Ready")
+            self.phase_changed.emit("ready", "Aegis Vision Ready \u2713")
         except Exception as e:
-            self.phase_changed.emit("error", f"Model Load Error: {e}")
+            self.phase_changed.emit("error", f"Model load error: {e}")
             return
         self._main_loop()
 
+    # ── Main event loop ───────────────────────────────────────────────────────
+
     def _main_loop(self):
         while self.running:
-            task = None
+            # Check rerun queue first
+            rerun_id = None
+            chat_entry = None
             with self.lock:
-                if self.chat_queue:
-                    task = self.chat_queue.pop(0)
-            if task:
-                user_text, history = task
-                self._chat_inference(user_text, history)
-            self.msleep(100)
+                if self._rerun_queue:
+                    rerun_id = self._rerun_queue.pop(0)
+                elif self.chat_queue:
+                    chat_entry = self.chat_queue.pop(0)
 
-    # ── Chat routing ──────────────────────────────────────────────────────────
+            if rerun_id is not None:
+                self._do_rerun(rerun_id)
+            elif chat_entry is not None:
+                user_text, _history, conv_id = chat_entry
+                self._handle_task(user_text, conv_id)
+            else:
+                self.msleep(50)
 
-    def _chat_inference(self, user_text: str, history: list):
-        needs_agent = any(t in user_text.lower() for t in AGENTIC_TRIGGERS)
-        try:
-            result = self._react_loop(user_text) if needs_agent else \
-                     self._plain_chat(user_text, history)
-        except Exception as e:
-            result = f"[Error] {e}"
-        self.chat_reply.emit(result)
+    # ── RECORD mode: first-run task handling ──────────────────────────────────
 
-    # ── Plain chat ────────────────────────────────────────────────────────────
+    def _handle_task(self, task: str, conv_id: int = None):
+        """Full LLM run. Saves action to DB. Emits only the answer to chat."""
 
-    def _plain_chat(self, user_text: str, history: list) -> str:
-        messages = [{"role": "system",
-                     "content": "You are Orvion, a helpful AI assistant. "
-                                "Answer clearly and concisely."}]
-        for h in history[-4:]:
-            messages.append({"role": h["role"], "content": h["content"]})
-        messages.append({"role": "user", "content": user_text})
-        if self.mode == "api":
-            return self._space.chat(messages)
-        return self._plain_chat_local(messages)
-
-    def _plain_chat_local(self, messages: list) -> str:
-        if self.model is None or self.processor is None:
-            return "[Error] Local model not loaded."
-        try:
-            import torch
-            fmt = [{"role": m["role"],
-                    "content": [{"type": "text", "text": m["content"]}]}
-                   for m in messages]
-            input_text = self.processor.apply_chat_template(
-                fmt, tokenize=False, add_generation_prompt=True)
-            inputs = self.processor(
-                text=[input_text], padding=True, return_tensors="pt").to("cuda")
-            with torch.inference_mode():
-                outputs = self.model.generate(**inputs, max_new_tokens=250, do_sample=False)
-            generated = outputs[:, inputs["input_ids"].shape[1]:]
-            return self.processor.batch_decode(
-                generated, skip_special_tokens=True)[0].strip()
-        except Exception as e:
-            return f"[Error] Plain chat failed: {e}"
-
-    # ── ReAct loop ────────────────────────────────────────────────────────────
-
-    def _react_loop(self, goal: str, max_steps: int = 40) -> str:
-        """
-        Single-observation ReAct loop matching training data format.
-        Same goal every step. OBSERVATIONS = only the previous step.
-        Terminates on [GOAL ACHIEVED], [FLOW BLOCKED], action=None, stale x3, or max_steps.
-        """
-        last_obs: dict  = {}
-        stale_count     = 0
-        last_action_sig = None
-
-        for step in range(1, max_steps + 1):
-            # ── 1. Browser state ──────────────────────────────────────────────
+        # Step 1: capture browser state if agentic
+        if _is_agentic(task):
+            self.step_log.emit("Capturing page state\u2026")
             self.browser_state = None
             self.request_browser_state.emit()
-            waited = 0
-            while self.browser_state is None and waited < 15000:
+            deadline = time.time() + 10.0
+            while self.browser_state is None and time.time() < deadline:
                 self.msleep(50)
-                waited += 50
-            if not self.browser_state:
-                self.step_log.emit("Warning: Browser state timeout - skipping step")
-                continue
+            if self.browser_state is None:
+                err = "Could not capture browser state (timeout)."
+                self._log_error(conv_id, err)
+                self.chat_reply.emit(err)
+                return
+            screenshot_bytes, raw_dom = self.browser_state
+        else:
+            screenshot_bytes, raw_dom = None, []
 
-            screenshot_bytes, dom_raw = self.browser_state
-            dom          = json.loads(dom_raw) if isinstance(dom_raw, str) else dom_raw
-            relevant_dom = self.retrieve_dom_context(dom, goal, top_k=30)
-            print(relevant_dom)
-            # ── 2. OBSERVATIONS ───────────────────────────────────────────────
-            if last_obs:
-                obs_text = (
-                    f"Previous Thought: {last_obs['thought']}\n"
-                    f"Previous Action: {json.dumps(last_obs['action'])}\n"
-                    f"Tool Result: {last_obs['tool_result']}"
-                )
+        # Step 2: score DOM
+        scored = score_and_select(raw_dom, task, top_k=5) if raw_dom else []
+
+        # Step 3: inference
+        self.step_log.emit("Sending to model\u2026")
+        try:
+            if self.mode == "api":
+                raw_output = self._infer_api(task, scored, screenshot_bytes)
             else:
-                obs_text = "None"
+                raw_output = self._infer_local(task, scored, screenshot_bytes)
+        except Exception as exc:
+            err = str(exc)
+            self._log_error(conv_id, f"Inference error: {err}")
+            self.chat_reply.emit(f"\u26a0\ufe0f Inference error: {err}")
+            return
 
-            context_block = (
-                f"<CONTEXT_BLOCK>\n"
-                f"[DOM]:\n{json.dumps(relevant_dom)}\n"
-                f"[OBSERVATIONS]:\n{obs_text}\n"
-                f"</CONTEXT_BLOCK>"
+        # Step 4: parse
+        action_type, elem_idx, value, thought, answer = parse_output(
+            raw_output, pool_size=len(scored))
+
+        # Step 5: dispatch
+        if action_type in ("answer", ""):
+            self.chat_reply.emit(answer or thought or raw_output)
+            return
+
+        if action_type == "bug_report":
+            msg = f"Bug filed \u2014 {value}"
+            if conv_id and self.db:
+                self.db.add_message(conv_id, "assistant", msg)
+            self.chat_reply.emit(msg)
+            return
+
+        # Executable action — get element coordinates
+        element = (scored[elem_idx]
+                   if elem_idx is not None and 0 <= elem_idx < len(scored)
+                   else None)
+        cx = element["box"]["cx"] if element else 0
+        cy = element["box"]["cy"] if element else 0
+        elem_text = element.get("text", "") if element else ""
+        elem_tag  = element.get("tag",  "") if element else ""
+        elem_type = element.get("type", "") if element else ""
+
+        # Save step to DB
+        step_id = None
+        if conv_id and self.db:
+            step_order = self.db.next_step_order(conv_id)
+            step_id    = self.db.add_step(
+                conv_id, step_order, action_type, elem_idx, value,
+                cx, cy, elem_text, elem_tag, elem_type, thought
             )
 
-            # ── 3. Single system + user message ──────────────────────────────
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": f"{context_block}\n\n{goal}"},
-            ]
+        # Execute in browser
+        result = self._execute_step(action_type, cx, cy, value, element=element)
+        is_error = isinstance(result, str) and result.startswith("ERROR")
 
-            # ── 4. Call model ─────────────────────────────────────────────────
-            if self.mode == "api":
-                response = self._space.chat(messages, image_bytes=screenshot_bytes)
-            else:
-                response = self._react_local(screenshot_bytes, context_block, goal)
+        if is_error:
+            self._log_error(conv_id, result, step_id=step_id)
+            if step_id and self.db:
+                self.db.set_step_status(step_id, "failed")
+            self.chat_reply.emit(f"\u26a0\ufe0f {result}")
+        else:
+            if step_id and self.db:
+                self.db.set_step_status(step_id, "passed")
+            reply = answer or f"Done \u2014 {action_type}({elem_idx})"
+            self.chat_reply.emit(reply)
 
-            # ── 5. Emit to chat panel ─────────────────────────────────────────
-            thought_line = next(
-                (l for l in response.split("\n") if l.startswith("Thought:")), "")
-            action_line = next(
-                (l for l in response.split("\n") if l.startswith("Action:")), "")
-            self.step_log.emit(f"Step {step} | {thought_line or response[:120]}")
-            if action_line:
-                self.step_log.emit(f"  {action_line}")
-            self.log_signal.emit(f"Aegis[{step}]: {response[:200]}", "#AAAAAA")
+    # ── RERUN mode ────────────────────────────────────────────────────────────
 
-            # ── 6. Terminal conditions ────────────────────────────────────────
-            if "[GOAL ACHIEVED]" in response:
-                self.step_log.emit("[GOAL ACHIEVED]")
-                return response
-            if "[FLOW BLOCKED]" in response:
-                self.step_log.emit("[FLOW BLOCKED]")
-                return response
+    def _do_rerun(self, conv_id: int):
+        """Replay all recorded steps for a conversation."""
+        if not self.db:
+            self.chat_reply.emit("\u26a0\ufe0f Database not connected.")
+            return
 
-            # ── 7. Parse action ───────────────────────────────────────────────
-            action = self.extract_action(response)
-            if action is None:
-                self.step_log.emit("No action - loop complete")
-                return response
-            if action.get("tool") == "__parse_error__":
-                self.step_log.emit("Parse error - retrying")
-                last_obs = {"thought": thought_line or "Parse error",
-                            "action": action, "tool_result": "parse_error"}
-                continue
+        conv = self.db.get_conversation(conv_id)
+        if not conv:
+            self.chat_reply.emit("\u26a0\ufe0f Conversation not found.")
+            return
 
-            # ── 8. Stale detection ────────────────────────────────────────────
-            sig         = json.dumps(action, sort_keys=True)
-            stale_count = (stale_count + 1) if sig == last_action_sig else 0
-            last_action_sig = sig
-            if stale_count >= 3:
-                self.step_log.emit("Stale action x3 - aborting")
-                return f"[Stuck] Repeated action {stale_count} times: {sig}"
+        # Navigate to test URL if set
+        url = conv["url"] if conv["url"] else None
+        if url:
+            self.tool_request.emit("open_url", {"url": url})
+            self._wait_tool_result(timeout=15)
+            self.msleep(1500)
 
-            # ── 9. Execute tool ───────────────────────────────────────────────
-            tool    = action.get("tool", "")
-            args    = action.get("args", {})
-            arg_str = ", ".join(f"{k}={repr(v)[:40]}" for k, v in args.items())
-            self.step_log.emit(f"  {tool}({arg_str})")
+        steps = self.db.get_steps(conv_id)
+        if not steps:
+            self.chat_reply.emit("No recorded steps to run.")
+            return
 
-            self._pending_tool_result = None
-            self.tool_request.emit(tool, args)
-            waited = 0
-            while self._pending_tool_result is None and waited < 15000:
-                self.msleep(50)
-                waited += 50
+        self.rerun_status.emit(f"Re-running {len(steps)} step(s)\u2026")
 
-            tool_result = str(self._pending_tool_result or "timeout")
-            self.step_log.emit(f"  -> {tool_result[:80]}")
+        for i, step in enumerate(steps):
+            step_id  = step["id"]
+            tool     = step["tool"]
+            value    = step["value"]
+            cx, cy   = step["cx"], step["cy"]
+            elem_text = step["elem_text"]
+            elem_tag  = step["elem_tag"]
+            elem_type = step["elem_type"]
+            thought   = step["thought"]
 
-            # ── 10. Store observation ─────────────────────────────────────────
-            last_obs = {
-                "thought":     thought_line or "...",
-                "action":      action,
-                "tool_result": tool_result,
+            self.rerun_status.emit(
+                f"Step {i+1}/{len(steps)}: {tool}({elem_text[:30] or f'{cx},{cy}'})")
+
+            # Build element dict from stored step metadata
+            step_el = {
+                "id":   "",   # not stored (pre-heal steps); self-heal will refresh
+                "name": "",
+                "cls":  "",
+                "tag":  elem_tag,
+                "type": elem_type,
             }
+            result = self._execute_step(tool, cx, cy, value, element=step_el)
+            is_error = isinstance(result, str) and result.startswith("ERROR")
 
-            # Navigation tools need more settle time
-            if tool in ("open_url", "click", "double_click",
-                        "right_click", "press_key", "go_back"):
-                self.msleep(1500)
+            if is_error:
+                # ── Self-healing ───────────────────────────────────────────
+                self.self_healing.emit(
+                    f"Orvion is attempting self healing for step {i+1}\u2026")
+                self._log_error(conv_id, result, step_id=step_id)
+
+                heal_result = self._self_heal(
+                    step_id=step_id, conv_id=conv_id,
+                    original_task=f"{tool} element with text '{elem_text}' "
+                                  f"type='{elem_type}'",
+                    tool=tool, value=value,
+                )
+                if heal_result == "healed":
+                    self.rerun_status.emit(
+                        f"Step {i+1} healed and executed \u2713")
+                else:
+                    self.db.set_step_status(step_id, "failed")
+                    self.rerun_status.emit(
+                        f"Step {i+1} could not be healed \u2014 stopping.")
+                    self.chat_reply.emit(
+                        f"\u26a0\ufe0f Re-run stopped at step {i+1}: "
+                        f"{tool} failed and self-healing did not recover.")
+                    return
             else:
-                self.msleep(600)
+                self.db.set_step_status(step_id, "passed")
 
-        return f"[Max steps ({max_steps}) reached]"
+        self.chat_reply.emit(
+            f"\u2705 Re-run complete \u2014 {len(steps)} step(s) passed.")
 
-    # ── Local vision inference ────────────────────────────────────────────────
+    # ── Self-healing ──────────────────────────────────────────────────────────
 
-    def _react_local(self, screenshot_bytes: bytes, context_block: str, goal: str) -> str:
-        if self.model is None or self.processor is None:
-            return "[Error] Local model not loaded."
+    def _self_heal(self, step_id, conv_id, original_task, tool, value) -> str:
+        """
+        Capture current DOM, ask LLM for the right element, update the step.
+        Returns 'healed' on success, 'failed' on failure.
+        """
+        self.browser_state = None
+        self.request_browser_state.emit()
+        deadline = time.time() + 10.0
+        while self.browser_state is None and time.time() < deadline:
+            self.msleep(50)
+        if self.browser_state is None:
+            return "failed"
+
+        screenshot_bytes, raw_dom = self.browser_state
+        scored = score_and_select(raw_dom, original_task, top_k=5) if raw_dom else []
+        if not scored:
+            return "failed"
+
         try:
-            import torch
-            from PIL import Image
-            from qwen_vl_utils import process_vision_info
-            screenshot = Image.open(BytesIO(screenshot_bytes))
-            messages = [
-                {"role": "system",
-                 "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-                {"role": "user",
-                 "content": [
-                     {"type": "image", "image": screenshot},
-                     {"type": "text",  "text": f"{context_block}\n\n{goal}"},
-                 ]},
-            ]
-            input_text = self.processor.apply_chat_template(
+            if self.mode == "api":
+                raw_output = self._infer_api(original_task, scored, screenshot_bytes)
+            else:
+                raw_output = self._infer_local(original_task, scored, screenshot_bytes)
+        except Exception as exc:
+            self._log_error(conv_id, f"Self-heal inference error: {exc}",
+                            step_id=step_id)
+            return "failed"
+
+        new_tool, new_elem_idx, new_value, new_thought, _ = parse_output(
+            raw_output, pool_size=len(scored))
+
+        if new_tool not in ("click", "type", "scroll", "select"):
+            return "failed"
+
+        element = (scored[new_elem_idx]
+                   if new_elem_idx is not None and 0 <= new_elem_idx < len(scored)
+                   else None)
+        if not element:
+            return "failed"
+
+        new_cx   = element["box"]["cx"]
+        new_cy   = element["box"]["cy"]
+        new_val  = new_value if new_value else value  # keep original value if model omits it
+
+        result = self._execute_step(new_tool, new_cx, new_cy, new_val,
+                                    element=element)
+        if isinstance(result, str) and result.startswith("ERROR"):
+            self._log_error(conv_id, f"Self-heal execution failed: {result}",
+                            step_id=step_id)
+            return "failed"
+
+        # Update DB with healed coordinates
+        if self.db:
+            self.db.update_step(
+                step_id,
+                new_cx, new_cy,
+                element.get("text", ""), element.get("tag", ""), element.get("type", ""),
+                new_val, new_thought, "healed"
+            )
+        return "healed"
+
+    # ── Step execution ────────────────────────────────────────────────────────
+
+    def _execute_step(self, tool: str, cx: int, cy: int, value: str,
+                      element: dict = None) -> str:
+        """
+        Emit tool_request and wait for result.
+        Returns result string; starts with 'ERROR' on failure.
+        element dict carries id/name/cls/tag/type for selector resolution.
+        """
+        self._pending_tool_result = None
+        args = {
+            "cx":    cx,
+            "cy":    cy,
+            "value": value,
+            # selector hints — priority: id > name > cls > tag+type > coords
+            "el_id":   (element or {}).get("id",   ""),
+            "el_name": (element or {}).get("name",  ""),
+            "el_cls":  (element or {}).get("cls",   ""),
+            "el_tag":  (element or {}).get("tag",   ""),
+            "el_type": (element or {}).get("type",  ""),
+        }
+        self.tool_request.emit(tool, args)
+        return self._wait_tool_result(timeout=15)
+
+    def _wait_tool_result(self, timeout: int = 15) -> str:
+        deadline = time.time() + timeout
+        while self._pending_tool_result is None and time.time() < deadline:
+            self.msleep(50)
+        return self._pending_tool_result or "ERROR: tool timeout"
+
+    # ── Inference helpers ─────────────────────────────────────────────────────
+
+    def _infer_api(self, task, scored, screenshot_bytes):
+        prompt_text = (build_space_prompt(task, scored)
+                       if scored else f"{SYSTEM_PROMPT}\n\nTask: {task}")
+        return self._space.generate(prompt_text, image_bytes=screenshot_bytes)
+
+    def _infer_local(self, task, scored, screenshot_bytes):
+        import torch
+        from qwen_vl_utils import process_vision_info
+        tmp_path = None
+        if screenshot_bytes:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                f.write(screenshot_bytes)
+                tmp_path = f.name
+        try:
+            messages = (build_prompt(task, scored, tmp_path)
+                        if (scored and tmp_path)
+                        else [{"role": "user", "content": task}])
+            text           = self.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = self.processor(
-                text=[input_text], images=image_inputs,
-                videos=video_inputs, padding=True, return_tensors="pt").to("cuda")
-            with torch.inference_mode():
-                outputs = self.model.generate(
-                    **inputs, max_new_tokens=200, do_sample=False, temperature=0.0)
-            return self.processor.batch_decode(
-                [outputs[0][inputs["input_ids"].shape[1]:]],
-                skip_special_tokens=True)[0].strip()
-        except Exception as e:
-            return f"[Error] Local vision failed: {e}"
+            img_in, vid_in = process_vision_info(messages)
+            inputs         = self.processor(
+                text=[text], images=img_in, videos=vid_in,
+                padding=True, return_tensors="pt",
+            ).to(self.model.device)
+            with torch.no_grad():
+                out_ids = self.model.generate(
+                    **inputs, max_new_tokens=256, do_sample=False,
+                    temperature=1.0, repetition_penalty=1.15)
+            new_ids = out_ids[0][inputs["input_ids"].shape[1]:]
+            return self.processor.decode(new_ids, skip_special_tokens=True).strip()
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    # ── Error logging ─────────────────────────────────────────────────────────
+
+    def _log_error(self, conv_id, error_text, step_id=None, context=""):
+        if self.db and conv_id:
+            try:
+                self.db.log_error(conv_id, error_text, context, step_id)
+            except Exception:
+                pass
+        self.step_log.emit(f"\u26a0\ufe0f {error_text}")

@@ -21,18 +21,11 @@ class Sidebar(QWidget):
         lay.setSpacing(0)
         lay.addSpacing(6)
 
-        btn = QPushButton("  ＋  New Conversation")
+        btn = QPushButton("  ＋  New Test")
         btn.setObjectName("new_chat_btn")
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(self.new_chat_requested)
         lay.addWidget(btn)
-
-        for label, active in [("  💬  Chats", True), ("  📄  Documents", False)]:
-            b = QPushButton(label); b.setObjectName("nav_btn")
-            if active:
-                b.setProperty("active", "true")
-            b.setCursor(Qt.PointingHandCursor)
-            lay.addWidget(b)
 
         sec = QLabel("RECENT"); sec.setObjectName("section_label")
         lay.addWidget(sec)
@@ -53,7 +46,8 @@ class Sidebar(QWidget):
 
     def refresh(self):
         self.conv_list.clear()
-        for cid, title, _ in self.db.get_conversations():
+        for row in self.db.get_conversations():
+            cid, title = row[0], row[1]
             item = QListWidgetItem(f"  {title}")
             item.setData(Qt.UserRole, cid)
             self.conv_list.addItem(item)

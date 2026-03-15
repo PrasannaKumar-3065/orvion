@@ -13,6 +13,86 @@ from inference_helpers import DOM_JS
 from styles import EDITOR_LIGHT, EDITOR_DARK
 
 
+# ── Selector builder ─────────────────────────────────────────────────────────
+#
+# Priority: id > name > class(es) > tag+type > coordinates fallback
+# Returns a JS expression string: either a CSS selector string or a
+# coordinate-based elementFromPoint call — always resolves to a single element.
+
+def _build_selector_js(el_id="", el_name="", el_cls="",
+                       el_tag="", el_type="", cx=0, cy=0) -> str:
+    """
+    Build the safest, most specific CSS selector for a given element,
+    falling back gracefully through attribute priority.
+
+    Returns a JS snippet that evaluates to the element (or null).
+    """
+    def esc(s):
+        # CSS.escape equivalent for use inside a JS string
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("'", "\\'")
+
+    # 1. id — most specific, guaranteed unique
+    if el_id:
+        return f'document.getElementById("{esc(el_id)}")'
+
+    # 2. name attribute — very reliable for form inputs
+    if el_name and el_tag in ("input", "textarea", "select", "button"):
+        tag = el_tag or "*"
+        sel = f'{tag}[name="{esc(el_name)}"]'
+        return f'document.querySelector("{sel}")'
+
+    # 3. name on any element
+    if el_name:
+        return f'document.querySelector("[name=\\"{esc(el_name)}\\"]")'
+
+    # 4. tag + type — e.g. input[type="password"]
+    if el_tag and el_type:
+        sel = f'{el_tag}[type="{esc(el_type)}"]'
+        return f'document.querySelector("{sel}")'
+
+    # 5. class(es) + tag — use first non-generic class
+    if el_cls and el_tag:
+        first_cls = [c for c in el_cls.split() if len(c) > 2]
+        if first_cls:
+            sel = f'{el_tag}.{first_cls[0]}'
+            return f'document.querySelector("{sel}")'
+
+    # 6. bare tag
+    if el_tag:
+        return f'document.querySelector("{el_tag}")'
+
+    # 7. coordinate fallback — last resort
+    return f'document.elementFromPoint({cx}, {cy})'
+
+
+# ── JS action helper ─────────────────────────────────────────────────────────
+
+# React / Vue / Angular all intercept native value assignment through
+# Object.getOwnPropertyDescriptor on the prototype — this is the canonical
+# way to trigger their onChange handlers correctly.
+_SET_VALUE_JS = """
+function _orvionSetValue(el, val) {
+    // Try native setter first (React controlled inputs)
+    var proto = el.tagName === 'INPUT'    ? window.HTMLInputElement.prototype
+              : el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype
+              : el.tagName === 'SELECT'   ? window.HTMLSelectElement.prototype
+              : null;
+    if (proto) {
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) {
+            setter.set.call(el, val);
+        } else {
+            el.value = val;
+        }
+    } else {
+        el.textContent = val;
+    }
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+"""
+
+
 class WebEngine(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,8 +132,10 @@ class WebEngine(QWidget):
         self.title_inp.returnPressed.connect(self._load_url)
         toollayout.addWidget(self.title_inp)
 
-        self.theme_btn = QPushButton("☀  Light"); self.theme_btn.setObjectName("theme_toggle_btn")
-        self.theme_btn.setCursor(Qt.PointingHandCursor); self.theme_btn.clicked.connect(self._toggle)
+        self.theme_btn = QPushButton("☀  Light")
+        self.theme_btn.setObjectName("theme_toggle_btn")
+        self.theme_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_btn.clicked.connect(self._toggle)
         toollayout.addWidget(self.theme_btn)
 
         lay.addWidget(toolbar)
@@ -66,6 +148,8 @@ class WebEngine(QWidget):
         self.browser.loadFinished.connect(lambda _: self.progress.hide())
         lay.addWidget(self.progress)
         lay.addWidget(self.browser)
+
+    # ── UI helpers ────────────────────────────────────────────────────────────
 
     def _toggle(self):
         self._light = not self._light
@@ -81,368 +165,38 @@ class WebEngine(QWidget):
             return
         if not text.startswith(("http://", "https://")):
             text = ("https://" + text) if "." in text else (
-                "https://www.google.com/search?q=" + QUrl.toPercentEncoding(text).data().decode()
+                "https://www.google.com/search?q="
+                + QUrl.toPercentEncoding(text).data().decode()
             )
         self.browser.setUrl(QUrl(text))
 
-    # ── Internal helpers ─────────────────────────────────────────────────────
+    # ── JS runner ─────────────────────────────────────────────────────────────
 
-    def _run_js(self, js: str):
-        """Run JS synchronously, return result."""
+    def _run_js(self, js: str) -> object:
+        """Run JS synchronously on the main thread, return the result."""
         loop   = QEventLoop()
         result = {}
-        def cb(r): result["v"] = r; loop.quit()
+        def cb(r):
+            result["v"] = r
+            loop.quit()
         self.browser.page().runJavaScript(js, cb)
         loop.exec_()
         return result.get("v")
 
-    def _safe_sel(self, selector: str) -> str:
-        """Escape selector for JS string."""
-        return selector.replace('"', '\\"').replace("'", "\\'")
+    # ── DOM / screenshot ──────────────────────────────────────────────────────
 
-    def _safe_str(self, text: str) -> str:
-        """Escape text for JS string."""
-        return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
-
-    # ── Agent-facing tool methods ────────────────────────────────────────────
-
-    def click_selector(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.click(); return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def double_click_selector(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.dispatchEvent(new MouseEvent("dblclick",{{bubbles:true,cancelable:true}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def right_click_selector(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.dispatchEvent(new MouseEvent("contextmenu",{{bubbles:true,cancelable:true,button:2}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def hover_selector(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.dispatchEvent(new MouseEvent("mouseover",{{bubbles:true}}));'
-            f'  el.dispatchEvent(new MouseEvent("mouseenter",{{bubbles:false}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def type_selector(self, selector: str, text: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.focus();'
-            f'  el.value="{self._safe_str(text)}";'
-            f'  el.dispatchEvent(new Event("input",{{bubbles:true}}));'
-            f'  el.dispatchEvent(new Event("change",{{bubbles:true}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def clear_and_type(self, selector: str, text: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.focus();'
-            f'  el.value="";'
-            f'  el.dispatchEvent(new Event("input",{{bubbles:true}}));'
-            f'  el.value="{self._safe_str(text)}";'
-            f'  el.dispatchEvent(new Event("input",{{bubbles:true}}));'
-            f'  el.dispatchEvent(new Event("change",{{bubbles:true}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def select_option(self, selector: str, value: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  var found=false;'
-            f'  for(var i=0;i<el.options.length;i++){{'
-            f'    if(el.options[i].value==="{self._safe_str(value)}" ||'
-            f'       el.options[i].text==="{self._safe_str(value)}")'
-            f'    {{ el.selectedIndex=i; found=true; break; }}'
-            f'  }}'
-            f'  if(!found) return "VALUE_NOT_FOUND";'
-            f'  el.dispatchEvent(new Event("change",{{bubbles:true}}));'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def press_key(self, key: str, selector: str = None) -> str:
-        """Press a key globally or on a specific element."""
-        KEY_CODES = {
-            "Enter": 13, "Tab": 9, "Escape": 27, "Space": 32,
-            "ArrowDown": 40, "ArrowUp": 38, "ArrowLeft": 37, "ArrowRight": 39,
-            "Backspace": 8, "Delete": 46, "Home": 36, "End": 35,
-        }
-        key_code = KEY_CODES.get(key, 0)
-        if selector:
-            r = self._run_js(
-                f'(function(){{'
-                f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-                f'  if(!el) return "NOT_FOUND";'
-                f'  el.focus();'
-                f'  el.dispatchEvent(new KeyboardEvent("keydown",{{key:"{key}",keyCode:{key_code},bubbles:true}}));'
-                f'  el.dispatchEvent(new KeyboardEvent("keyup",{{key:"{key}",keyCode:{key_code},bubbles:true}}));'
-                f'  return "success";'
-                f'}})();'
-            )
-        else:
-            r = self._run_js(
-                f'(function(){{'
-                f'  document.dispatchEvent(new KeyboardEvent("keydown",{{key:"{key}",keyCode:{key_code},bubbles:true}}));'
-                f'  document.dispatchEvent(new KeyboardEvent("keyup",{{key:"{key}",keyCode:{key_code},bubbles:true}}));'
-                f'  return "success";'
-                f'}})();'
-            )
-        return r or "success"
-
-    def scroll_down(self, pixels: int = 300) -> str:
-        self._run_js(f"window.scrollBy(0, {int(pixels)});")
-        return "success"
-
-    def scroll_up(self, pixels: int = 300) -> str:
-        self._run_js(f"window.scrollBy(0, -{int(pixels)});")
-        return "success"
-
-    def scroll_to_top(self) -> str:
-        self._run_js("window.scrollTo(0, 0);")
-        return "success"
-
-    def scroll_to_bottom(self) -> str:
-        self._run_js("window.scrollTo(0, document.body.scrollHeight);")
-        return "success"
-
-    def scroll_to_element(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  el.scrollIntoView({{behavior:"smooth",block:"center"}});'
-            f'  return "success";'
-            f'}})();'
-        )
-        return r or "NOT_FOUND"
-
-    def verify_text_present(self, text: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var body=document.body.innerText||"";'
-            f'  return body.includes("{self._safe_str(text)}") ? "success" : "FAIL: text not found";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def verify_text_absent(self, text: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var body=document.body.innerText||"";'
-            f'  return !body.includes("{self._safe_str(text)}") ? "success" : "FAIL: text unexpectedly present";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def verify_element_visible(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "FAIL: element not found";'
-            f'  var r=el.getBoundingClientRect();'
-            f'  var visible=(r.width>0&&r.height>0&&r.top<window.innerHeight&&r.bottom>0);'
-            f'  return visible ? "success" : "FAIL: element not visible";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def verify_element_enabled(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "FAIL: element not found";'
-            f'  return !el.disabled ? "success" : "FAIL: element is disabled";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def verify_url_contains(self, substring: str) -> str:
-        current = self.browser.url().toString()
-        if substring in current:
-            return "success"
-        return f"FAIL: URL '{current}' does not contain '{substring}'"
-
-    def verify_page_title(self, expected: str) -> str:
-        r = self._run_js("document.title;")
-        title = str(r or "")
-        if expected in title:
-            return "success"
-        return f"FAIL: title is '{title}', expected to contain '{expected}'"
-
-    def verify_input_value(self, selector: str, expected: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "FAIL: element not found";'
-            f'  return el.value==="{self._safe_str(expected)}" ? "success"'
-            f'       : "FAIL: value is \'"+el.value+"\', expected \'{expected}\'";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def verify_element_count(self, selector: str, expected_count: int) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var els=document.querySelectorAll("{self._safe_sel(selector)}");'
-            f'  var n=els.length;'
-            f'  return n==={int(expected_count)} ? "success"'
-            f'       : "FAIL: found "+n+" elements, expected {expected_count}";'
-            f'}})();'
-        )
-        return r or "FAIL: no result"
-
-    def get_text(self, selector: str) -> str:
-        r = self._run_js(
-            f'(function(){{'
-            f'  var el=document.querySelector("{self._safe_sel(selector)}");'
-            f'  if(!el) return "NOT_FOUND";'
-            f'  return (el.innerText||el.textContent||el.value||"").trim();'
-            f'}})();'
-        )
-        return str(r) if r is not None else "NOT_FOUND"
-
-    def get_current_url(self) -> str:
-        return self.browser.url().toString()
-
-    def get_page_title(self) -> str:
-        r = self._run_js("document.title;")
-        return str(r or "")
-
-    def go_back(self) -> str:
-        self.browser.back()
-        return "success"
-
-    def wait_for_element(self, selector: str, timeout: int = 10) -> str:
-        """Poll for up to `timeout` seconds for element to appear."""
-        loop    = QEventLoop()
-        found   = [False]
-        elapsed = [0]
-        interval = 500  # ms
-
-        def check():
-            elapsed[0] += interval
-            r = self._run_js(
-                f'!!document.querySelector("{self._safe_sel(selector)}")'
-            )
-            if r:
-                found[0] = True
-                loop.quit()
-            elif elapsed[0] >= timeout * 1000:
-                loop.quit()
-
-        timer = QTimer()
-        timer.timeout.connect(check)
-        timer.start(interval)
-        loop.exec_()
-        timer.stop()
-        return "success" if found[0] else f"FAIL: '{selector}' not found after {timeout}s"
-
-    def wait_for_text(self, text: str, timeout: int = 10) -> str:
-        loop    = QEventLoop()
-        found   = [False]
-        elapsed = [0]
-        interval = 500
-
-        def check():
-            elapsed[0] += interval
-            r = self._run_js(
-                f'document.body.innerText.includes("{self._safe_str(text)}")'
-            )
-            if r:
-                found[0] = True
-                loop.quit()
-            elif elapsed[0] >= timeout * 1000:
-                loop.quit()
-
-        timer = QTimer()
-        timer.timeout.connect(check)
-        timer.start(interval)
-        loop.exec_()
-        timer.stop()
-        return "success" if found[0] else f"FAIL: text '{text}' not found after {timeout}s"
-
-    def wait_for_url_change(self, expected_substring: str, timeout: int = 10) -> str:
-        loop    = QEventLoop()
-        found   = [False]
-        elapsed = [0]
-        interval = 500
-
-        def check():
-            elapsed[0] += interval
-            current = self.browser.url().toString()
-            if expected_substring in current:
-                found[0] = True
-                loop.quit()
-            elif elapsed[0] >= timeout * 1000:
-                loop.quit()
-
-        timer = QTimer()
-        timer.timeout.connect(check)
-        timer.start(interval)
-        loop.exec_()
-        timer.stop()
-        return "success" if found[0] else f"FAIL: URL did not contain '{expected_substring}' after {timeout}s"
-
-    def wait_for_network_idle(self, timeout: int = 10) -> str:
-        """Wait for page load to finish."""
-        self.wait_for_load(timeout * 1000)
-        return "success"
-
-    def browser_wait(self, seconds: float) -> str:
-        loop = QEventLoop()
-        QTimer.singleShot(int(seconds * 1000), loop.quit)
-        loop.exec_()
-        return "success"
-
-    def get_dom(self):
-        loop   = QEventLoop()
-        result = {}
-        def cb(r): result["v"] = r; loop.quit()
-        self.browser.page().runJavaScript(DOM_JS, cb)
-        loop.exec_()
-        raw = result.get("v", "[]")
-        try:
-            return json.loads(raw) if isinstance(raw, str) else (raw or [])
-        except Exception:
-            return []
+    def get_dom(self) -> list:
+        # DOM_JS is an arrow-function expression: "() => { ... return pool; }"
+        # Qt's runJavaScript evaluates but does NOT auto-call function expressions
+        # the way Playwright's page.evaluate() does.
+        # Wrapping as (...)() makes it an IIFE that actually executes.
+        raw = self._run_js(f"({DOM_JS})()")
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return []
+        return raw if isinstance(raw, list) else []
 
     def get_screenshot(self) -> bytes:
         pixmap = self.browser.grab()
@@ -450,6 +204,13 @@ class WebEngine(QWidget):
         buf.open(QIODevice.WriteOnly)
         pixmap.save(buf, "PNG")
         return bytes(buf.data())
+
+    def get_state(self) -> tuple:
+        screenshot = self.get_screenshot()
+        dom_list   = self.get_dom()
+        return screenshot, json.dumps(dom_list, ensure_ascii=False)
+
+    # ── Navigation ────────────────────────────────────────────────────────────
 
     def open_url(self, url: str) -> str:
         if not url.startswith(("http://", "https://")):
@@ -459,7 +220,8 @@ class WebEngine(QWidget):
 
     def wait_for_load(self, timeout: int = 15000):
         loop = QEventLoop()
-        def on_finished(_): QTimer.singleShot(500, loop.quit)
+        def on_finished(_):
+            QTimer.singleShot(500, loop.quit)
         self.browser.loadFinished.connect(on_finished)
         QTimer.singleShot(timeout, loop.quit)
         loop.exec_()
@@ -467,3 +229,219 @@ class WebEngine(QWidget):
             self.browser.loadFinished.disconnect(on_finished)
         except Exception:
             pass
+
+    def browser_wait(self, seconds: float) -> str:
+        loop = QEventLoop()
+        QTimer.singleShot(int(seconds * 1000), loop.quit)
+        loop.exec_()
+        return "success"
+
+    # ── Agent actions (called by main_window._execute_tool) ───────────────────
+    #
+    # Each method receives the full args dict from tool_request, which carries:
+    #   cx, cy              — viewport coordinates from DOM pipeline
+    #   el_id, el_name,     — selector hints, priority order:
+    #   el_cls, el_tag,       id > name > tag+type > class+tag > coords
+    #   el_type
+    #   value               — text to type / option to select / scroll px
+
+    def agent_click(self, args: dict) -> str:
+        """
+        Click an element.
+
+        Strategy:
+          1. JS: resolve element, scroll into view, get its viewport centre.
+          2. Qt: send real mouse press+release to focusProxy() at those coords.
+
+        Using Qt mouse events (not JS .click()) means navigation triggered by
+        the click doesn't cause the JS callback to vanish before it fires.
+        """
+        from PyQt5.QtGui import QMouseEvent
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QEvent, QPoint, QPointF
+
+        el_js = _build_selector_js(
+            el_id   = args.get("el_id",   ""),
+            el_name = args.get("el_name", ""),
+            el_cls  = args.get("el_cls",  ""),
+            el_tag  = args.get("el_tag",  ""),
+            el_type = args.get("el_type", ""),
+            cx      = args.get("cx", 0),
+            cy      = args.get("cy", 0),
+        )
+
+        # Step 1 — scroll into view and get the element's centre coordinate
+        pos_js = f"""
+        (function() {{
+            var el = {el_js};
+            if (!el) return null;
+            el.scrollIntoView({{block:'center', inline:'center', behavior:'instant'}});
+            el.focus();
+            var r = el.getBoundingClientRect();
+            return {{x: Math.round(r.left + r.width/2),
+                     y: Math.round(r.top  + r.height/2),
+                     tag: el.tagName}};
+        }})()
+        """
+        pos = self._run_js(pos_js)
+
+        # Fall back to stored coordinates if JS can't find element
+        if pos and isinstance(pos, dict) and "x" in pos:
+            cx = int(pos["x"])
+            cy = int(pos["y"])
+        else:
+            cx = args.get("cx", 0)
+            cy = args.get("cy", 0)
+
+        # Step 2 — Qt mouse events on focusProxy (the Chromium render surface)
+        target = self.browser.focusProxy() or self.browser
+        pt     = QPointF(cx, cy)
+        press  = QMouseEvent(QEvent.MouseButtonPress,   pt, Qt.LeftButton,
+                             Qt.LeftButton, Qt.NoModifier)
+        release = QMouseEvent(QEvent.MouseButtonRelease, pt, Qt.LeftButton,
+                              Qt.LeftButton, Qt.NoModifier)
+        QApplication.sendEvent(target, press)
+        QApplication.sendEvent(target, release)
+
+        tag = pos.get("tag", "?") if isinstance(pos, dict) else "?"
+        return f"clicked:{tag}@({cx},{cy})"
+
+    def agent_type(self, args: dict) -> str:
+        """
+        Type text into a form element.
+
+        Two-stage strategy:
+          Stage A — JS:
+            1. Resolve element by selector (id > name > tag+type > …)
+            2. Scroll into view, focus, click
+            3. Clear with native prototype setter (works for React controlled inputs)
+            4. Build the final string from scratch in the loop (never read el.value
+               back — reading after a failed clear returns stale text and causes
+               accumulation like "tomsmithtomsmith")
+            5. Dispatch keydown → keypress → native-set(full_so_far) → InputEvent
+               → keyup for each character, then a final change event
+
+          Stage B — Qt key events to focusProxy():
+            The actual Chromium render widget so keys go through the real
+            browser input pipeline as a visual fallback.
+        """
+        from PyQt5.QtGui import QKeyEvent
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QEvent
+
+        text  = args.get("value", "")
+        el_js = _build_selector_js(
+            el_id   = args.get("el_id",   ""),
+            el_name = args.get("el_name", ""),
+            el_cls  = args.get("el_cls",  ""),
+            el_tag  = args.get("el_tag",  ""),
+            el_type = args.get("el_type", ""),
+            cx      = args.get("cx", 0),
+            cy      = args.get("cy", 0),
+        )
+
+        # Build the char list as a safe JS literal via json.dumps
+        chars_js = json.dumps(list(text))
+
+        type_js = f"""
+        (function() {{
+            var el = {el_js};
+            if (!el) return 'ERROR: element not found';
+
+            el.scrollIntoView({{block:'center', inline:'center', behavior:'instant'}});
+            el.focus();
+            el.click();
+
+            // Resolve native value setter once
+            var nativeSetter = null;
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {{
+                var proto = el.tagName === 'INPUT'
+                    ? window.HTMLInputElement.prototype
+                    : window.HTMLTextAreaElement.prototype;
+                var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) nativeSetter = desc.set;
+            }}
+
+            function setVal(v) {{
+                if (nativeSetter) nativeSetter.call(el, v);
+                else el.value = v;
+            }}
+
+            // Clear existing value
+            setVal('');
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+
+            // Type char by char — accumulate into 'built' so we never read
+            // el.value back (reading after a failed clear returns stale text)
+            var chars = {chars_js};
+            var built = '';
+            for (var i = 0; i < chars.length; i++) {{
+                var ch = chars[i];
+                built += ch;
+                el.dispatchEvent(new KeyboardEvent('keydown',  {{key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true, cancelable: true}}));
+                el.dispatchEvent(new KeyboardEvent('keypress', {{key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true, cancelable: true}}));
+                setVal(built);
+                el.dispatchEvent(new InputEvent('input', {{data: ch, inputType: 'insertText', bubbles: true}}));
+                el.dispatchEvent(new KeyboardEvent('keyup',   {{key: ch, code: 'Key' + ch.toUpperCase(), bubbles: true, cancelable: true}}));
+            }}
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+            return built;
+        }})()
+        """
+        result = self._run_js(type_js)
+
+        if result is None or str(result).startswith("ERROR"):
+            return f"ERROR: type failed — {result}"
+
+        # Stage B — Qt key events to focusProxy (Chromium render surface)
+        loop = QEventLoop()
+        QTimer.singleShot(50, loop.quit)
+        loop.exec_()
+
+        target = self.browser.focusProxy() or self.browser
+        for char in text:
+            press   = QKeyEvent(QEvent.KeyPress,   0, Qt.NoModifier, char)
+            release = QKeyEvent(QEvent.KeyRelease, 0, Qt.NoModifier, char)
+            QApplication.sendEvent(target, press)
+            QApplication.sendEvent(target, release)
+
+        return f"typed:{result}"
+
+    def agent_select(self, args: dict) -> str:
+        value = args.get("value", "")
+        el_js = _build_selector_js(
+            el_id   = args.get("el_id",   ""),
+            el_name = args.get("el_name", ""),
+            el_cls  = args.get("el_cls",  ""),
+            el_tag  = args.get("el_tag",  "select"),
+            el_type = args.get("el_type", ""),
+            cx      = args.get("cx", 0),
+            cy      = args.get("cy", 0),
+        )
+        js = f"""
+        (function() {{
+            {_SET_VALUE_JS}
+            var el = {el_js};
+            if (!el) return 'ERROR: element not found';
+            if (el.tagName.toLowerCase() !== 'select') {{
+                // Maybe elementFromPoint landed on a child — try parent
+                var p = el.closest('select');
+                if (p) el = p; else return 'ERROR: not a select element';
+            }}
+            _orvionSetValue(el, {json.dumps(value)});
+            return 'selected:' + el.value;
+        }})()
+        """
+        result = self._run_js(js)
+        return str(result) if result is not None else "ERROR: js returned null"
+
+    def agent_scroll(self, args: dict) -> str:
+        value = args.get("value", "down")
+        try:
+            px = abs(int(value))
+        except (ValueError, TypeError):
+            px = 300
+        direction = "down" if value not in ("up",) else "up"
+        dy = px if direction == "down" else -px
+        self._run_js(f"window.scrollBy(0, {dy});")
+        return f"scrolled:{direction}:{px}"

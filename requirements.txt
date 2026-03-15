@@ -35,6 +35,13 @@ requests>=2.31.0
 gradio_client>=0.7.0
 
 
+# ── DOM Scoring (sentence similarity for element selection) ──
+#  Used by score_and_select() in inference_helpers.py.
+#  Loads all-MiniLM-L6-v2 (~90 MB) at worker startup.
+#  Falls back to TF-IDF if not installed.
+sentence-transformers>=2.2.0
+
+
 # ── .env loading ─────────────────────────────────────────────
 #  agent_worker.py calls load_dotenv() to read HF_TOKEN
 python-dotenv>=1.0.0
@@ -46,3 +53,5 @@ packaging>=23.0
 
 # ── Build Tool (not needed to run from source) ───────────────
 # pyinstaller>=6.0.0
+
+# conda env create -f environment.yml

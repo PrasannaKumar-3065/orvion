@@ -7,7 +7,7 @@ try:
 except ImportError:
     psutil = None
 
-REPO_ID          = "sanaX3065/Orvion-vl-3b"
+REPO_ID          = "sanaX3065/aegis-qwen2vl-3b"
 LOCAL_MODEL_PATH = "./local_model/Orvion-vl-3b"
 
 
